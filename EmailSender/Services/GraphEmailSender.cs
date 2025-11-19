@@ -1,4 +1,5 @@
 using Azure.Identity;
+using Azure.Core;
 using Microsoft.Extensions.Options;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
@@ -44,11 +45,12 @@ public class GraphEmailSender : IEmailSender
             _options.TenantId,
             _options.ClientId,
             _options.ClientSecret);
-
-        var scopes = new[] { "https://graph.microsoft.com/.default" };
+        var token = credential.GetToken(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }));
+        Console.WriteLine($"Token acquired, length={token.Token?.Length}");
 
         // For Microsoft.Graph v5 with Kiota pipeline
-        var authProvider = new AzureIdentityAuthenticationProvider(credential, scopes);
+        // AzureIdentityAuthenticationProvider constructor expects allowed hosts (without http/https) as the second argument.
+        var authProvider = new AzureIdentityAuthenticationProvider(credential, new[] { "graph.microsoft.com" }, null, false, new[] { "https://graph.microsoft.com/.default" });
         var httpClient = GraphClientFactory.Create();
         var requestAdapter = new HttpClientRequestAdapter(authProvider, httpClient: httpClient);
         _graph = new GraphServiceClient(requestAdapter);
