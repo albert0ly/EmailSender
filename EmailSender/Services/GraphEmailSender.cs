@@ -137,7 +137,8 @@ public class GraphEmailSender : IEmailSender
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             request.Content.Headers.ContentLength = read;
             var totalText = total.HasValue ? total.Value.ToString() : "*";
-            request.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalText}");
+            // Move Content-Range header to content headers so it is sent correctly.
+            request.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalText}");
 
             var response = await http.SendAsync(request, ct);
             if ((int)response.StatusCode == 201 || (int)response.StatusCode == 200)
