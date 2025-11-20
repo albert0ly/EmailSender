@@ -48,7 +48,7 @@ namespace MailSenderLibTester
             this.lblTenant.AutoSize = true;
             this.lblTenant.Location = new System.Drawing.Point(12, 15);
             this.lblTenant.Name = "lblTenant";
-            this.lblTenant.Size = new System.Drawing.Size(58, 13);
+            this.lblTenant.Size = new System.Drawing.Size(56, 13);
             this.lblTenant.TabIndex = 0;
             this.lblTenant.Text = "Tenant Id:";
             // 
@@ -64,7 +64,7 @@ namespace MailSenderLibTester
             this.lblClientId.AutoSize = true;
             this.lblClientId.Location = new System.Drawing.Point(12, 41);
             this.lblClientId.Name = "lblClientId";
-            this.lblClientId.Size = new System.Drawing.Size(50, 13);
+            this.lblClientId.Size = new System.Drawing.Size(48, 13);
             this.lblClientId.TabIndex = 2;
             this.lblClientId.Text = "Client Id:";
             // 
@@ -80,7 +80,7 @@ namespace MailSenderLibTester
             this.lblClientSecret.AutoSize = true;
             this.lblClientSecret.Location = new System.Drawing.Point(12, 67);
             this.lblClientSecret.Name = "lblClientSecret";
-            this.lblClientSecret.Size = new System.Drawing.Size(73, 13);
+            this.lblClientSecret.Size = new System.Drawing.Size(70, 13);
             this.lblClientSecret.TabIndex = 4;
             this.lblClientSecret.Text = "Client Secret:";
             // 
@@ -97,7 +97,7 @@ namespace MailSenderLibTester
             this.lblMailbox.AutoSize = true;
             this.lblMailbox.Location = new System.Drawing.Point(12, 93);
             this.lblMailbox.Name = "lblMailbox";
-            this.lblMailbox.Size = new System.Drawing.Size(103, 13);
+            this.lblMailbox.Size = new System.Drawing.Size(113, 13);
             this.lblMailbox.TabIndex = 6;
             this.lblMailbox.Text = "Mailbox (sender UPN):";
             // 
@@ -123,6 +123,7 @@ namespace MailSenderLibTester
             this.txtTo.Name = "txtTo";
             this.txtTo.Size = new System.Drawing.Size(540, 20);
             this.txtTo.TabIndex = 9;
+            this.txtTo.Text = "albert.lyubarsky@gmail.com";
             // 
             // lblCc
             // 
@@ -171,6 +172,7 @@ namespace MailSenderLibTester
             this.txtSubject.Name = "txtSubject";
             this.txtSubject.Size = new System.Drawing.Size(479, 20);
             this.txtSubject.TabIndex = 15;
+            this.txtSubject.Text = "Subject";
             // 
             // chkIsHtml
             // 
@@ -179,7 +181,7 @@ namespace MailSenderLibTester
             this.chkIsHtml.CheckState = System.Windows.Forms.CheckState.Checked;
             this.chkIsHtml.Location = new System.Drawing.Point(615, 202);
             this.chkIsHtml.Name = "chkIsHtml";
-            this.chkIsHtml.Size = new System.Drawing.Size(59, 17);
+            this.chkIsHtml.Size = new System.Drawing.Size(67, 17);
             this.chkIsHtml.TabIndex = 16;
             this.chkIsHtml.Text = "Is HTML";
             this.chkIsHtml.UseVisualStyleBackColor = true;
@@ -199,7 +201,7 @@ namespace MailSenderLibTester
             this.txtBody.Name = "txtBody";
             this.txtBody.Size = new System.Drawing.Size(655, 180);
             this.txtBody.TabIndex = 18;
-            this.txtBody.Text = "";
+            this.txtBody.Text = "Body";
             // 
             // lblAttachments
             // 
@@ -280,6 +282,7 @@ namespace MailSenderLibTester
             this.Text = "MailSenderLib Tester";
             this.ResumeLayout(false);
             this.PerformLayout();
+
         }
 
         #endregion

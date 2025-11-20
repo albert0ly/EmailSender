@@ -151,65 +151,106 @@ namespace MailSenderLib
             return json;
         }
 
-        private static async Task UploadAttachmentAsync(HttpClient http, string mailbox, string draftId, string fileName, string contentType, Stream content, CancellationToken ct)
+        private static async Task UploadAttachmentAsync(
+            HttpClient http,
+            string mailbox,
+            string draftId,
+            string fileName,
+            string contentType,
+            Stream content,
+            CancellationToken ct)
         {
-            // Build payload as an object and serialize to JSON to avoid manual escaping errors
+            if (content == null) throw new ArgumentNullException(nameof(content));
+            if (!content.CanSeek)
+                throw new InvalidOperationException("Stream must support seeking for chunked upload.");
+
+            long totalSize = content.Length;
+            content.Position = 0;
+
+            // -------------------------------
+            // 1. Create upload session
+            // -------------------------------
             var payload = new
             {
                 attachmentItem = new
                 {
                     attachmentType = "file",
-                    name = fileName ?? string.Empty,
-                    size = content.CanSeek ? (object)content.Length : null,
-                    contentType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType
+                    name = fileName,
+                    size = totalSize,
+                    contentType = string.IsNullOrWhiteSpace(contentType)
+                        ? "application/octet-stream"
+                        : contentType
                 }
             };
-            var startSessionJson = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
 
-            var sessionResp = await http.PostAsync($"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(draftId)}/attachments/createUploadSession", new StringContent(startSessionJson, System.Text.Encoding.UTF8, "application/json"), ct);
+            var startSessionJson = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            var sessionResp = await http.PostAsync(
+                $"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(draftId)}/attachments/createUploadSession",
+                new StringContent(startSessionJson, System.Text.Encoding.UTF8, "application/json"),
+                ct
+            );
+
             await EnsureSuccess(sessionResp, ct, "create upload session");
+
             var sessionJson = await sessionResp.Content.ReadAsStringAsync();
             var uploadUrl = Newtonsoft.Json.Linq.JObject.Parse(sessionJson).Value<string>("uploadUrl");
-            if (string.IsNullOrEmpty(uploadUrl)) throw new InvalidOperationException("Upload session URL not found.");
 
-            const int chunkSize =5 *1024 *1024; //5MB
-            long start =0;
-            long? total = content.CanSeek ? content.Length : (long?)null;
-            if (content.CanSeek) content.Position =0;
-            var buffer = new byte[chunkSize];
-            int read;
-            while ((read = await content.ReadAsync(buffer,0, buffer.Length, ct)) >0)
+            if (string.IsNullOrWhiteSpace(uploadUrl))
+                throw new InvalidOperationException("Upload session URL not found.");
+
+            Console.WriteLine("Upload session URL: " + uploadUrl);
+
+            // -------------------------------
+            // 2. Upload chunks
+            // -------------------------------
+            const int chunkSize = 5 * 1024 * 1024; // 5 MB
+            byte[] buffer = new byte[chunkSize];
+            long start = 0;
+
+            using (var uploadClient = new HttpClient()) // fresh client
             {
-                var end = start + read -1;
-                using (var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl))
+                while (start < totalSize)
                 {
-                    req.Content = new ByteArrayContent(buffer, 0, read);
-                    req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-                    req.Content.Headers.ContentLength = read;
+                    int read = await content.ReadAsync(buffer, 0, buffer.Length, ct);
+                    if (read <= 0) break;
 
+                    long end = start + read - 1;
 
-                    req.Headers.TryAddWithoutValidation(
-                        "Content-Range",
-                        $"bytes {start}-{end}/{(total.HasValue ? total.Value.ToString() : "*")}"
-                    );
-
-                    var resp = await http.SendAsync(req, ct);
-
-                    if (resp.StatusCode == HttpStatusCode.OK || resp.StatusCode == HttpStatusCode.Created)
-                        break; // upload finished
-
-                    if (resp.StatusCode != HttpStatusCode.Accepted)
+                    using (var put = new HttpRequestMessage(HttpMethod.Put, new Uri(uploadUrl, UriKind.Absolute)))
                     {
-                        var bodyText = await resp.Content.ReadAsStringAsync();
-                        throw new InvalidOperationException(
-                            $"Chunk upload failed: {(int)resp.StatusCode} {resp.ReasonPhrase} - {bodyText}"
-                        );
+                        put.Content = new ByteArrayContent(buffer, 0, read);
+                        put.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                        put.Content.Headers.ContentLength = read;
+                        put.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");
+
+                        var resp = await uploadClient.SendAsync(put, ct);
+                        var body = await resp.Content.ReadAsStringAsync();
+
+                        Console.WriteLine($"Chunk {start}-{end}/{totalSize}, Status: {(int)resp.StatusCode}");
+                        Console.WriteLine(body);
+
+                        if ((int)resp.StatusCode == 200 || (int)resp.StatusCode == 201)
+                        {
+                            Console.WriteLine("Upload complete!");
+                            return;
+                        }
+                        else if ((int)resp.StatusCode != 202)
+                        {
+                            throw new InvalidOperationException(
+                                $"Chunk upload failed {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}"
+                            );
+                        }
+
+                        start = end + 1;
                     }
                 }
-
-                start = end +1;
             }
+
+            Console.WriteLine("All chunks uploaded successfully.");
         }
+
+
+
 
         private static string EscapeJson(string s)
         {
