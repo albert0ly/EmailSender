@@ -77,3 +77,6 @@ Thumbs.db
 
 # Qodo tool dir
 .qodo/
+
+# Local developer-only secrets for MailSenderLibTester
+MailSenderLibTester/MailSenderLibTester-secrets.config
