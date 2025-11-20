@@ -1,13 +1,14 @@
+using Azure.Core;
+using Azure.Identity;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
-using Azure.Core;
-using Azure.Identity;
 
 namespace MailSenderLib
 {
@@ -182,21 +183,30 @@ namespace MailSenderLib
                 var end = start + read -1;
                 using (var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl))
                 {
-                    req.Content = new ByteArrayContent(buffer,0, read);
+                    req.Content = new ByteArrayContent(buffer, 0, read);
                     req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
                     req.Content.Headers.ContentLength = read;
-                    req.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{(total.HasValue ? total.Value.ToString() : "*")}");
-                   // req.Headers.Authorization = http.DefaultRequestHeaders.Authorization;
+
+
+                    req.Headers.TryAddWithoutValidation(
+                        "Content-Range",
+                        $"bytes {start}-{end}/{(total.HasValue ? total.Value.ToString() : "*")}"
+                    );
 
                     var resp = await http.SendAsync(req, ct);
-                    if ((int)resp.StatusCode ==201 || (int)resp.StatusCode ==200)
-                        break; // completed
-                    if ((int)resp.StatusCode !=202)
+
+                    if (resp.StatusCode == HttpStatusCode.OK || resp.StatusCode == HttpStatusCode.Created)
+                        break; // upload finished
+
+                    if (resp.StatusCode != HttpStatusCode.Accepted)
                     {
                         var bodyText = await resp.Content.ReadAsStringAsync();
-                        throw new InvalidOperationException($"Chunk upload failed: {(int)resp.StatusCode} {resp.ReasonPhrase} - {bodyText}");
+                        throw new InvalidOperationException(
+                            $"Chunk upload failed: {(int)resp.StatusCode} {resp.ReasonPhrase} - {bodyText}"
+                        );
                     }
                 }
+
                 start = end +1;
             }
         }
