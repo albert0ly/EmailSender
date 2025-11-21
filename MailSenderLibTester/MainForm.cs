@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using System.Configuration;
 using MailSenderLib;
 using System.Collections.Specialized;
+using System.Drawing;
 
 namespace MailSenderLibTester
 {
@@ -15,10 +16,204 @@ namespace MailSenderLibTester
     {
         private readonly List<string> _attachmentPaths = new List<string>();
 
+        // Controls for receive tab
+        private TabControl _tabControl;
+        private TabPage _tabSend;
+        private TabPage _tabReceive;
+        private TextBox _txtRecvMailbox;
+        private Button _btnGet;
+        private DataGridView _dgvMessages;
+        private TextBox _txtDetailsSubject;
+        private TextBox _txtDetailsBody;
+        private ListBox _lstRecvAttachments;
+        private PictureBox _pbPreview;
+        private Label _lblRecvStatus;
+
         public MainForm()
         {
             InitializeComponent();
             LoadConfigIntoFields();
+
+            // Build runtime TabControl and move existing send controls into first tab
+            SetupTabs();
+        }
+
+        private void SetupTabs()
+        {
+            // Create TabControl and tabs
+            _tabControl = new TabControl { Dock = DockStyle.Fill };
+            _tabSend = new TabPage("Send Email");
+            _tabReceive = new TabPage("Receive Emails");
+
+            // Move existing top-level controls into Send tab. We assume designer created these controls with known names.
+            var sendControlNames = new[] {
+                "txtTenant","txtClientId","txtClientSecret","txtMailbox",
+                "txtTo","txtCc","txtBcc","txtSubject","txtBody",
+                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend"
+            };
+
+            foreach (var name in sendControlNames)
+            {
+                var ctrls = this.Controls.Find(name, true);
+                foreach (Control c in ctrls)
+                {
+                    // reparent to send tab
+                    _tabSend.Controls.Add(c);
+                }
+            }
+
+            // Some other controls (labels etc.) are left as-is by designer; try to move all child controls from main form's container panel if exists
+            // Add tab pages to control
+            _tabControl.TabPages.Add(_tabSend);
+            _tabControl.TabPages.Add(_tabReceive);
+
+            // Add TabControl to form and dock
+            // Place tab control at top-level of form
+            this.Controls.Add(_tabControl);
+            _tabControl.BringToFront();
+
+            // Build Receive tab UI
+            BuildReceiveTabUi();
+        }
+
+        private void BuildReceiveTabUi()
+        {
+            var padding = 8;
+            int x = padding, y = padding, w = _tabReceive.ClientSize.Width - padding * 2;
+
+            // Mailbox textbox and Get button
+            _txtRecvMailbox = new TextBox { Name = "txtRecvMailbox", Width = 300, Left = x, Top = y };
+            _txtRecvMailbox.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            _txtRecvMailbox.Text = txtMailbox != null ? txtMailbox.Text : string.Empty; // if designer control exists
+            _btnGet = new Button { Text = "Get", Left = x + 310, Top = y - 2, Width = 80 };
+            _btnGet.Click += BtnGet_Click;
+
+            _lblRecvStatus = new Label { Text = "", Left = x + 400, Top = y + 3, AutoSize = true };
+
+            _tabReceive.Controls.Add(_txtRecvMailbox);
+            _tabReceive.Controls.Add(_btnGet);
+            _tabReceive.Controls.Add(_lblRecvStatus);
+
+            y += 30;
+
+            // DataGridView for messages
+            _dgvMessages = new DataGridView { Left = x, Top = y, Width = _tabReceive.ClientSize.Width - 2 * padding, Height = 200, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            _dgvMessages.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            _dgvMessages.ReadOnly = true;
+            _dgvMessages.AutoGenerateColumns = false;
+            _dgvMessages.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Id", DataPropertyName = "Id", Visible = false });
+            _dgvMessages.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Subject", DataPropertyName = "Subject", Width = 400 });
+            _dgvMessages.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Received", DataPropertyName = "ReceivedDateTime", Width = 160 });
+            _dgvMessages.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "HasAttachments", DataPropertyName = "HasAttachments", Width = 80 });
+            _dgvMessages.SelectionChanged += DgvMessages_SelectionChanged;
+
+            _tabReceive.Controls.Add(_dgvMessages);
+
+            y += 210;
+
+            // Details: Subject label and textbox
+            var lblSub = new Label { Text = "Subject:", Left = x, Top = y + 6, AutoSize = true };
+            _txtDetailsSubject = new TextBox { Left = x + 60, Top = y, Width = 700, ReadOnly = true, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            _tabReceive.Controls.Add(lblSub);
+            _tabReceive.Controls.Add(_txtDetailsSubject);
+
+            y += 30;
+
+            // Body
+            var lblBody = new Label { Text = "Body:", Left = x, Top = y + 6, AutoSize = true };
+            _txtDetailsBody = new TextBox { Left = x + 60, Top = y, Width = 700, Height = 120, Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            _tabReceive.Controls.Add(lblBody);
+            _tabReceive.Controls.Add(_txtDetailsBody);
+
+            // Attachments list
+            _lstRecvAttachments = new ListBox { Left = x + 770, Top = padding + 60, Width = 240, Height = 300, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            _lstRecvAttachments.SelectedIndexChanged += LstRecvAttachments_SelectedIndexChanged;
+            _tabReceive.Controls.Add(_lstRecvAttachments);
+
+            // PictureBox preview
+            _pbPreview = new PictureBox { Left = x + 770, Top = padding + 370, Width = 240, Height = 180, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            _tabReceive.Controls.Add(_pbPreview);
+
+            // Resize handling
+            _tabReceive.Resize += (s, e) =>
+            {
+                _dgvMessages.Width = _tabReceive.ClientSize.Width - 2 * padding - 260;
+                _txtDetailsSubject.Width = _dgvMessages.Width - 60;
+                _txtDetailsBody.Width = _dgvMessages.Width - 60;
+                _lstRecvAttachments.Left = _dgvMessages.Right + 10;
+                _pbPreview.Left = _lstRecvAttachments.Left;
+            };
+        }
+
+        private async void BtnGet_Click(object sender, EventArgs e)
+        {
+            _btnGet.Enabled = false;
+            _lblRecvStatus.Text = "Fetching...";
+            try
+            {
+                var options = new GraphMailOptions
+                {
+                    TenantId = txtTenant != null ? txtTenant.Text.Trim() : string.Empty,
+                    ClientId = txtClientId != null ? txtClientId.Text.Trim() : string.Empty,
+                    ClientSecret = txtClientSecret != null ? txtClientSecret.Text.Trim() : string.Empty,
+                    MailboxAddress = txtMailbox != null ? txtMailbox.Text.Trim() : string.Empty
+                };
+
+                var receiver = new GraphMailReceiver(options);
+                var list = await receiver.ReceiveEmailsAsync(_txtRecvMailbox.Text.Trim(), CancellationToken.None);
+
+                _dgvMessages.DataSource = list;
+                _lblRecvStatus.Text = string.Format("{0} messages", list.Count);
+            }
+            catch (Exception ex)
+            {
+                _lblRecvStatus.Text = ex.Message;
+            }
+            finally
+            {
+                _btnGet.Enabled = true;
+            }
+        }
+
+        private void DgvMessages_SelectionChanged(object sender, EventArgs e)
+        {
+            if (_dgvMessages.SelectedRows.Count == 0) return;
+            var row = _dgvMessages.SelectedRows[0];
+            if (row.DataBoundItem is MailMessageDto msg)
+            {
+                _txtDetailsSubject.Text = msg.Subject ?? string.Empty;
+                _txtDetailsBody.Text = msg.Body ?? string.Empty;
+
+                _lstRecvAttachments.Items.Clear();
+                _pbPreview.Image = null;
+                foreach (var a in msg.Attachments)
+                {
+                    _lstRecvAttachments.Items.Add(a);
+                }
+            }
+        }
+
+        private void LstRecvAttachments_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            _pbPreview.Image = null;
+            if (_lstRecvAttachments.SelectedItem is MailAttachmentDto a)
+            {
+                if (!string.IsNullOrEmpty(a.ContentBase64) && !string.IsNullOrEmpty(a.ContentType) && a.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var bytes = Convert.FromBase64String(a.ContentBase64);
+                        using (var ms = new MemoryStream(bytes))
+                        {
+                            _pbPreview.Image = Image.FromStream(ms);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore image errors
+                    }
+                }
+            }
         }
 
         private void btnAddAttachment_Click(object sender, EventArgs e)
