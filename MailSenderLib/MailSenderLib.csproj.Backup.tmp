@@ -23,15 +23,15 @@
     <BuildDateUtc>$([System.DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm 'UTC'"))</BuildDateUtc>
     <InformationalVersion>1.0.0 (build $(BuildDateUtc))</InformationalVersion>
 
-    <!-- Explicitly set AssemblyInformationalVersion to prefer our string; some toolchains may still append metadata after this value, but this sets the base value -->
+    <!-- Explicitly set AssemblyInformationalVersion to prevent other tooling from appending metadata like git SHA -->
     <AssemblyInformationalVersion>1.0.0 (build $(BuildDateUtc))</AssemblyInformationalVersion>
 
     <!-- Optional: basic product/company attributes for cleaner file properties -->
     <Company>Infobay</Company>
     <Product>MailSenderLib</Product>
 
-    <!-- Use default SDK generation of assembly attributes -->
-    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <!-- Disable SDK automatic generation of assembly attributes so we can control them exactly -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -41,5 +41,9 @@
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.11.4" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Properties\" />
   </ItemGroup>
 </Project>
