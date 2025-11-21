@@ -221,7 +221,8 @@ namespace MailSenderLib
                         put.Content = new ByteArrayContent(buffer, 0, read);
                         put.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
                         put.Content.Headers.ContentLength = read;
-                        put.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");
+                        // IMPORTANT: Content-Range must be a content header so proxies/HttpClient don't strip it
+                        put.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");
 
                         var resp = await uploadClient.SendAsync(put, ct);
                         var body = await resp.Content.ReadAsStringAsync();
