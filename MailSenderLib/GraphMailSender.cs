@@ -4,9 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -43,22 +41,22 @@ namespace MailSenderLib
         /// <summary>
         /// Sends an email using Microsoft Graph with optional CC, BCC and attachments.
         /// </summary>
-        /// <param name="to">One or more primary recipients.</param>
-        /// <param name="cc">Optional list of CC recipients.</param>
-        /// <param name="bcc">Optional list of BCC recipients.</param>
+        /// <param name="toRecipients">One or more primary recipients.</param>
+        /// <param name="ccRecipients">Optional list of CC recipients.</param>
+        /// <param name="bccRecipients">Optional list of BCC recipients.</param>
         /// <param name="subject">Email subject.</param>
         /// <param name="body">Email body content.</param>
         /// <param name="isHtml">If true, body is treated as HTML; otherwise plain text.</param>
         /// <param name="attachments">Zero or more attachments as filename, content type and stream.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         Task SendEmailAsync(
-            IEnumerable<string> to,
-            IEnumerable<string> cc,
-            IEnumerable<string> bcc,
+            IEnumerable<string> toRecipients,
+            IEnumerable<string>? ccRecipients,
+            IEnumerable<string>? bccRecipients,
             string subject,
             string body,
             bool isHtml,
-            IEnumerable<(string FileName, string ContentType, Stream ContentStream)> attachments,
+            IEnumerable<(string FileName, string ContentType, Stream ContentStream)>? attachments,
             CancellationToken cancellationToken = default);
     }
 
@@ -70,7 +68,7 @@ namespace MailSenderLib
         private readonly GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
-        private static readonly string[] scopes = new[] { "https://graph.microsoft.com/.default" };
+        private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
 
         /// <summary>
         /// Creates a new GraphMailSender.
@@ -83,10 +81,11 @@ namespace MailSenderLib
         }
 
         // EnsureSuccess moved above SendEmailAsync so the method is in scope at call sites.
-        private static async Task EnsureSuccess(HttpResponseMessage resp, CancellationToken ct, string action)
+        private static async Task EnsureSuccess(HttpResponseMessage resp, string action, CancellationToken ct)
         {
             if (!resp.IsSuccessStatusCode)
             {
+                // ReadAsStringAsync(CancellationToken) is not available on .NET Standard 2.0, use parameterless overload
                 var body = await resp.Content.ReadAsStringAsync();
                 throw new InvalidOperationException($"Failed to {action}: {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}");
             }
@@ -94,32 +93,32 @@ namespace MailSenderLib
 
         /// <inheritdoc />
         public async Task SendEmailAsync(
-            IEnumerable<string> to,
-            IEnumerable<string> cc,
-            IEnumerable<string> bcc,
+            IEnumerable<string> toRecipients,
+            IEnumerable<string>? ccRecipients,
+            IEnumerable<string>? bccRecipients,
             string subject,
             string body,
             bool isHtml,
-            IEnumerable<(string FileName, string ContentType, Stream ContentStream)> attachments,
+            IEnumerable<(string FileName, string ContentType, Stream ContentStream)>? attachments,
             CancellationToken cancellationToken = default)
         {
-            if (to == null) throw new ArgumentNullException(nameof(to));
-            var toList = new List<string>(to);
-            var ccList = cc != null ? new List<string>(cc) : new List<string>();
-            var bccList = bcc != null ? new List<string>(bcc) : new List<string>();
-            if (toList.Count == 0) throw new ArgumentException("At least one recipient is required.", nameof(to));
+            if (toRecipients == null) throw new ArgumentNullException(nameof(toRecipients));
+            var toList = new List<string>(toRecipients);
+            var ccList = ccRecipients != null ? new List<string>(ccRecipients) : new List<string>();
+            var bccList = bccRecipients != null ? new List<string>(bccRecipients) : new List<string>();
+            if (toList.Count == 0) throw new ArgumentException("At least one recipient is required.", nameof(toRecipients));
 
             // Acquire token
             var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), cancellationToken);
 
             using (var http = new HttpClient() { BaseAddress = GraphBaseUri })
             {
-                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
 
                 //1. Create draft message
                 var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml);
                 var draftResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages", new StringContent(draftPayload, System.Text.Encoding.UTF8, "application/json"), cancellationToken);
-                await EnsureSuccess(draftResp, cancellationToken, "create draft");
+                await EnsureSuccess(draftResp, "create draft", cancellationToken);
                 var draftJson = await draftResp.Content.ReadAsStringAsync();
                 var draftIdMaybe = Newtonsoft.Json.Linq.JObject.Parse(draftJson).Value<string>("id");
                 if (string.IsNullOrWhiteSpace(draftIdMaybe)) throw new InvalidOperationException("Failed to obtain draft id.");
@@ -136,7 +135,7 @@ namespace MailSenderLib
 
                 //3. Send the message
                 var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken);
-                await EnsureSuccess(sendResp, cancellationToken, "send message");
+                await EnsureSuccess(sendResp, "send message", cancellationToken);
             }
         }
 
@@ -161,7 +160,6 @@ namespace MailSenderLib
             Stream content,
             CancellationToken ct)
         {
-            if (content == null) throw new ArgumentNullException(nameof(content));
             if (!content.CanSeek)
                 throw new InvalidOperationException("Stream must support seeking for chunked upload.");
 
@@ -191,7 +189,7 @@ namespace MailSenderLib
                 ct
             );
 
-            await EnsureSuccess(sessionResp, ct, "create upload session");
+            await EnsureSuccess(sessionResp, "create upload session", ct);
 
             var sessionJson = await sessionResp.Content.ReadAsStringAsync();
             var uploadUrl = Newtonsoft.Json.Linq.JObject.Parse(sessionJson).Value<string>("uploadUrl");
@@ -205,7 +203,7 @@ namespace MailSenderLib
             // 2. Upload chunks
             // -------------------------------
             const int chunkSize = 5 * 1024 * 1024; // 5 MB
-            byte[] buffer = new byte[chunkSize];
+            var buffer = new byte[chunkSize];
             long start = 0;
 
             using (var uploadClient = new HttpClient()) // fresh client
@@ -220,7 +218,7 @@ namespace MailSenderLib
                     using (var put = new HttpRequestMessage(HttpMethod.Put, new Uri(uploadUrl, UriKind.Absolute)))
                     {
                         put.Content = new ByteArrayContent(buffer, 0, read);
-                        put.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                        put.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
                         put.Content.Headers.ContentLength = read;
                         // IMPORTANT: Content-Range must be a content header so proxies/HttpClient don't strip it
                         put.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");

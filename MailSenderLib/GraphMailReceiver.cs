@@ -246,10 +246,15 @@ namespace MailSenderLib
                         var value = h.Value<string>("value");
                         if (string.IsNullOrWhiteSpace(name)) continue;
                         var key = name!;
-                        if (msg.Headers.ContainsKey(key))
-                            msg.Headers[key] = string.Concat(msg.Headers[key], ",", value);
+                        // Use TryGetValue to avoid duplicate dictionary lookup (fix CA1854)
+                        if (msg.Headers.TryGetValue(key, out var existing))
+                        {
+                            msg.Headers[key] = string.Concat(existing, ",", value);
+                        }
                         else
+                        {
                             msg.Headers[key] = value;
+                        }
                     }
                 }
 
