@@ -1,5 +1,7 @@
 using Azure.Core;
 using Azure.Identity;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
@@ -16,24 +18,76 @@ namespace MailSenderLib.Services
     /// <summary>
     /// Simple Graph mail receiver using client credentials and REST APIs.
     /// </summary>
-    public class GraphMailReceiver : Interfaces.IGraphMailReceiver
+    public class GraphMailReceiver : Interfaces.IGraphMailReceiver, IDisposable
     {
         private readonly MailSenderLib.Options.GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private readonly HttpClient? _httpClient;
+        private readonly ILogger<GraphMailReceiver>? _logger;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
         private static readonly string[] GraphScopes = new[] { "https://graph.microsoft.com/.default" };
+
+        // Cached token and lock for refresh
+        private AccessToken _cachedToken;
+        private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
+        private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(60);
+
+        // LoggerMessage delegates
+        private static readonly Action<ILogger, Exception?> _logFailedToAcquireToken =
+            LoggerMessage.Define(LogLevel.Error, new EventId(2000, nameof(_logFailedToAcquireToken)), "Failed to acquire access token for GraphMailReceiver");
+        private static readonly Action<ILogger, Exception?> _logRefreshingToken =
+            LoggerMessage.Define(LogLevel.Debug, new EventId(2001, nameof(_logRefreshingToken)), "Refreshing access token for GraphMailReceiver");
+        private static readonly Action<ILogger, DateTimeOffset, Exception?> _logTokenAcquired =
+            LoggerMessage.Define<DateTimeOffset>(LogLevel.Debug, new EventId(2002, nameof(_logTokenAcquired)), "Access token acquired, expires on {ExpiresOn}");
+        private static readonly Action<ILogger, int, string, string, Exception?> _logFailedToListMessages =
+            LoggerMessage.Define<int, string, string>(LogLevel.Error, new EventId(2003, nameof(_logFailedToListMessages)), "Failed to list messages: {Status} {Reason} - {Body}");
+        private static readonly Action<ILogger, string, Exception?> _logFailedToFetchAttachments =
+            LoggerMessage.Define<string>(LogLevel.Warning, new EventId(2004, nameof(_logFailedToFetchAttachments)), "Failed to fetch attachments for message {MessageId}");
 
         /// <summary>
         /// Creates a new instance with the provided Graph options.
         /// </summary>
         /// <param name="options">Graph authentication and mailbox options.</param>
         /// <param name="httpClient">Optional HttpClient for testing/DI. If not provided a new HttpClient will be created per call.</param>
-        public GraphMailReceiver(MailSenderLib.Options.GraphMailOptions options, HttpClient? httpClient = null)
+        public GraphMailReceiver(MailSenderLib.Options.GraphMailOptions options, HttpClient? httpClient = null, object? logger = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
             _httpClient = httpClient;
+            _logger = logger as ILogger<GraphMailReceiver>;
+        }
+
+        // Return a cached token if valid, otherwise refresh in a thread-safe manner
+        private async Task<AccessToken> GetAccessTokenAsync(CancellationToken ct)
+        {
+            if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
+            {
+                return _cachedToken;
+            }
+
+            await _tokenLock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
+                {
+                    return _cachedToken;
+                }
+
+                if (_logger != null) _logRefreshingToken(_logger, null);
+                var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct).ConfigureAwait(false);
+                _cachedToken = token;
+                if (_logger != null) _logTokenAcquired(_logger, _cachedToken.ExpiresOn, null);
+                return _cachedToken;
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logFailedToAcquireToken(_logger, ex);
+                throw;
+            }
+            finally
+            {
+                _tokenLock.Release();
+            }
         }
 
         /// <inheritdoc />
@@ -42,7 +96,8 @@ namespace MailSenderLib.Services
             var user = string.IsNullOrWhiteSpace(mailbox) ? _options.MailboxAddress : mailbox!;
             if (string.IsNullOrWhiteSpace(user)) throw new ArgumentException("Mailbox must be provided.", nameof(mailbox));
 
-            var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
+            // Acquire token (cached)
+            var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
             using var http = _httpClient ?? new HttpClient();
             http.BaseAddress = GraphBaseUri;
@@ -51,14 +106,15 @@ namespace MailSenderLib.Services
             var select = "id,subject,body,receivedDateTime,isRead,hasAttachments,webLink,toRecipients,ccRecipients,bccRecipients,internetMessageHeaders";
             var url = $"users/{Uri.EscapeDataString(user)}/mailFolders/inbox/messages?$filter=isRead eq false&$select={Uri.EscapeDataString(select)}&$top=100";
 
-            var resp = await http.GetAsync(url, ct);
+            var resp = await http.GetAsync(url, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
-                var body = await resp.Content.ReadAsStringAsync();
+                var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (_logger != null) _logFailedToListMessages(_logger, (int)resp.StatusCode, resp.ReasonPhrase, body, null);
                 throw new InvalidOperationException($"Failed to list messages: {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}");
             }
 
-            var json = await resp.Content.ReadAsStringAsync();
+            var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
             var root = JObject.Parse(json);
             var array = root.Value<JArray>("value");
             var result = new List<MailMessageDto>();
@@ -157,10 +213,10 @@ namespace MailSenderLib.Services
                     try
                     {
                         var attUrl = $"users/{Uri.EscapeDataString(user)}/messages/{Uri.EscapeDataString(id)}/attachments";
-                        var attResp = await http.GetAsync(attUrl, ct);
+                        var attResp = await http.GetAsync(attUrl, ct).ConfigureAwait(false);
                         if (attResp.IsSuccessStatusCode)
                         {
-                            var attJson = await attResp.Content.ReadAsStringAsync();
+                            var attJson = await attResp.Content.ReadAsStringAsync().ConfigureAwait(false);
                             var attRoot = JObject.Parse(attJson);
                             var attArray = attRoot.Value<JArray>("value");
                             if (attArray != null)
@@ -188,8 +244,9 @@ namespace MailSenderLib.Services
                             }
                         }
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        if (_logger != null) _logFailedToFetchAttachments(_logger, id, ex);
                         // ignore attachment fetch errors per-message
                     }
                 }
@@ -204,7 +261,7 @@ namespace MailSenderLib.Services
                         using (var patchReq = new HttpRequestMessage(new HttpMethod("PATCH"), $"users/{Uri.EscapeDataString(user)}/messages/{Uri.EscapeDataString(id)}") { Content = patchContent })
                         {
                             // send and ignore
-                            await http.SendAsync(patchReq, ct);
+                            await http.SendAsync(patchReq, ct).ConfigureAwait(false);
                         }
                     }
                     catch
@@ -217,6 +274,18 @@ namespace MailSenderLib.Services
             }
 
             return result;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                _tokenLock?.Dispose();
+            }
+            catch
+            {
+                // ignore
+            }
         }
     }
 }
