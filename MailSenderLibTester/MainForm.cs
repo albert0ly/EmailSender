@@ -7,6 +7,9 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Configuration;
 using MailSenderLib;
+using MailSenderLib.Models;
+using MailSenderLib.Options;
+using MailSenderLib.Services;
 using System.Collections.Specialized;
 using System.Drawing;
 
@@ -84,7 +87,7 @@ namespace MailSenderLibTester
             // Mailbox textbox and Get button
             _txtRecvMailbox = new TextBox { Name = "txtRecvMailbox", Width = 300, Left = x, Top = y };
             _txtRecvMailbox.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            _txtRecvMailbox.Text = txtMailbox != null ? txtMailbox.Text : string.Empty; // if designer control exists
+            _txtRecvMailbox.Text = txtTo != null ? txtTo.Text : string.Empty; // if designer control exists
             _btnGet = new Button { Text = "Get", Left = x + 310, Top = y - 2, Width = 80 };
             _btnGet.Click += BtnGet_Click;
 

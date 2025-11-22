@@ -123,7 +123,7 @@ namespace MailSenderLibTester
             this.txtTo.Name = "txtTo";
             this.txtTo.Size = new System.Drawing.Size(540, 20);
             this.txtTo.TabIndex = 9;
-            this.txtTo.Text = "albert.lyubarsky@gmail.com";
+            this.txtTo.Text = "albert.lyubarsky@albertly01.onmicrosoft.com";
             // 
             // lblCc
             // 

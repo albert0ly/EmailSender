@@ -9,123 +9,18 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
+using MailSenderLib.Models;
 
-namespace MailSenderLib
+namespace MailSenderLib.Services
 {
-    /// <summary>
-    /// DTO representing a message attachment returned by Graph.
-    /// </summary>
-    public class MailAttachmentDto
-    {
-        /// <summary>
-        /// Attachment identifier.
-        /// </summary>
-        public string Id { get; set; } = string.Empty;
-
-        /// <summary>
-        /// File name of the attachment.
-        /// </summary>
-        public string? Name { get; set; }
-
-        /// <summary>
-        /// Content type (MIME) of the attachment.
-        /// </summary>
-        public string? ContentType { get; set; }
-
-        /// <summary>
-        /// Size in bytes.
-        /// </summary>
-        public long? Size { get; set; }
-
-        /// <summary>
-        /// True if the attachment is inline.
-        /// </summary>
-        public bool? IsInline { get; set; }
-
-        /// <summary>
-        /// Base64-encoded content for file attachments (when retrieved).
-        /// </summary>
-        public string? ContentBase64 { get; set; }
-
-        /// <summary>
-        /// Returns a friendly string for UI lists.
-        /// </summary>
-        public override string ToString() => Name ?? Id;
-    }
-
-    /// <summary>
-    /// DTO representing a mail message with metadata and attachments.
-    /// </summary>
-    public class MailMessageDto
-    {
-        /// <summary>
-        /// Message identifier.
-        /// </summary>
-        public string Id { get; set; } = string.Empty;
-
-        /// <summary>
-        /// Message subject.
-        /// </summary>
-        public string? Subject { get; set; }
-
-        /// <summary>
-        /// Message body (HTML or text).
-        /// </summary>
-        public string? Body { get; set; }
-
-        /// <summary>
-        /// Received date/time.
-        /// </summary>
-        public DateTimeOffset? ReceivedDateTime { get; set; }
-
-        /// <summary>
-        /// True if message is marked as read.
-        /// </summary>
-        public bool? IsRead { get; set; }
-
-        /// <summary>
-        /// True if the message has attachments.
-        /// </summary>
-        public bool? HasAttachments { get; set; }
-
-        /// <summary>
-        /// Link to view the message in Outlook web.
-        /// </summary>
-        public string? WebLink { get; set; }
-
-        /// <summary>
-        /// To recipients as email addresses.
-        /// </summary>
-        public List<string> To { get; set; } = new List<string>();
-
-        /// <summary>
-        /// Cc recipients as email addresses.
-        /// </summary>
-        public List<string> Cc { get; set; } = new List<string>();
-
-        /// <summary>
-        /// Bcc recipients as email addresses.
-        /// </summary>
-        public List<string> Bcc { get; set; } = new List<string>();
-
-        /// <summary>
-        /// Internet message headers (name -> value).
-        /// </summary>
-        public Dictionary<string, string?> Headers { get; set; } = new Dictionary<string, string?>();
-
-        /// <summary>
-        /// Attachment metadata and optional content.
-        /// </summary>
-        public List<MailAttachmentDto> Attachments { get; set; } = new List<MailAttachmentDto>();
-    }
-
     /// <summary>
     /// Simple Graph mail receiver using client credentials and REST APIs.
     /// </summary>
-    public class GraphMailReceiver
+    public class GraphMailReceiver : Interfaces.IGraphMailReceiver
     {
-        private readonly GraphMailOptions _options;
+        private readonly MailSenderLib.Options.GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
+        private readonly HttpClient? _httpClient;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
         private static readonly string[] GraphScopes = new[] { "https://graph.microsoft.com/.default" };
 
@@ -133,18 +28,15 @@ namespace MailSenderLib
         /// Creates a new instance with the provided Graph options.
         /// </summary>
         /// <param name="options">Graph authentication and mailbox options.</param>
-        public GraphMailReceiver(GraphMailOptions options)
+        /// <param name="httpClient">Optional HttpClient for testing/DI. If not provided a new HttpClient will be created per call.</param>
+        public GraphMailReceiver(MailSenderLib.Options.GraphMailOptions options, HttpClient? httpClient = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
+            _httpClient = httpClient;
         }
 
-        /// <summary>
-        /// Receives unread messages from the mailbox inbox, fetches attachments and marks messages as read.
-        /// </summary>
-        /// <param name="mailbox">Mailbox UPN or id. If null or empty, uses configured MailboxAddress.</param>
-        /// <param name="ct">Cancellation token.</param>
-        /// <returns>List of messages with attachments.</returns>
+        /// <inheritdoc />
         public async Task<List<MailMessageDto>> ReceiveEmailsAsync(string? mailbox, CancellationToken ct = default)
         {
             var user = string.IsNullOrWhiteSpace(mailbox) ? _options.MailboxAddress : mailbox!;
@@ -152,7 +44,8 @@ namespace MailSenderLib
 
             var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
 
-            using var http = new HttpClient() { BaseAddress = GraphBaseUri };
+            using var http = _httpClient ?? new HttpClient();
+            http.BaseAddress = GraphBaseUri;
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
             var select = "id,subject,body,receivedDateTime,isRead,hasAttachments,webLink,toRecipients,ccRecipients,bccRecipients,internetMessageHeaders";

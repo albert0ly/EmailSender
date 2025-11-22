@@ -5,93 +5,37 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace MailSenderLib
+namespace MailSenderLib.Services
 {
-    /// <summary>
-    /// Options for authenticating and sending email via Microsoft Graph.
-    /// </summary>
-    public class GraphMailOptions
-    {
-        /// <summary>
-        /// Azure AD tenant ID (GUID).
-        /// </summary>
-        public string TenantId { get; set; } = string.Empty;
-        /// <summary>
-        /// Application (client) ID of the app registration.
-        /// </summary>
-        public string ClientId { get; set; } = string.Empty;
-        /// <summary>
-        /// Client secret for the app registration.
-        /// </summary>
-        public string ClientSecret { get; set; } = string.Empty;
-        /// <summary>
-        /// Sender mailbox UPN or user ID used for the send action.
-        /// </summary>
-        public string MailboxAddress { get; set; } = string.Empty; // sender mailbox UPN or id
-    }
-
-    /// <summary>
-    /// Abstraction for sending emails using Microsoft Graph.
-    /// </summary>
-    public interface IGraphMailSender
-    {
-        /// <summary>
-        /// Sends an email using Microsoft Graph with optional CC, BCC and attachments.
-        /// </summary>
-        /// <param name="toRecipients">One or more primary recipients.</param>
-        /// <param name="ccRecipients">Optional list of CC recipients.</param>
-        /// <param name="bccRecipients">Optional list of BCC recipients.</param>
-        /// <param name="subject">Email subject.</param>
-        /// <param name="body">Email body content.</param>
-        /// <param name="isHtml">If true, body is treated as HTML; otherwise plain text.</param>
-        /// <param name="attachments">Zero or more attachments as filename, content type and stream.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
-        Task SendEmailAsync(
-            IEnumerable<string> toRecipients,
-            IEnumerable<string>? ccRecipients,
-            IEnumerable<string>? bccRecipients,
-            string subject,
-            string body,
-            bool isHtml,
-            IEnumerable<(string FileName, string ContentType, Stream ContentStream)>? attachments,
-            CancellationToken cancellationToken = default);
-    }
-
     /// <summary>
     /// Lightweight Graph email sender usable from .NET Standard2.0 via Graph REST APIs and Azure.Identity.
     /// </summary>
-    public class GraphMailSender : IGraphMailSender
+    public class GraphMailSender : Interfaces.IGraphMailSender
     {
-        private readonly GraphMailOptions _options;
+        private readonly MailSenderLib.Options.GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
 
-        /// <summary>
-        /// Creates a new GraphMailSender.
-        /// </summary>
-        /// <param name="options">Graph configuration including tenant, client and sender mailbox.</param>
-        public GraphMailSender(GraphMailOptions options)
+        public GraphMailSender(MailSenderLib.Options.GraphMailOptions options)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
         }
 
-        // EnsureSuccess moved above SendEmailAsync so the method is in scope at call sites.
         private static async Task EnsureSuccess(HttpResponseMessage resp, string action, CancellationToken ct)
         {
             if (!resp.IsSuccessStatusCode)
             {
-                // ReadAsStringAsync(CancellationToken) is not available on .NET Standard 2.0, use parameterless overload
                 var body = await resp.Content.ReadAsStringAsync();
                 throw new InvalidOperationException($"Failed to {action}: {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}");
             }
         }
 
-        /// <inheritdoc />
         public async Task SendEmailAsync(
             IEnumerable<string> toRecipients,
             IEnumerable<string>? ccRecipients,
@@ -113,7 +57,7 @@ namespace MailSenderLib
 
             using (var http = new HttpClient() { BaseAddress = GraphBaseUri })
             {
-                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
+                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
                 //1. Create draft message
                 var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml);
@@ -203,7 +147,7 @@ namespace MailSenderLib
             // 2. Upload chunks
             // -------------------------------
             const int chunkSize = 5 * 1024 * 1024; // 5 MB
-            var buffer = new byte[chunkSize];
+            byte[] buffer = new byte[chunkSize];
             long start = 0;
 
             using (var uploadClient = new HttpClient()) // fresh client
@@ -218,7 +162,7 @@ namespace MailSenderLib
                     using (var put = new HttpRequestMessage(HttpMethod.Put, new Uri(uploadUrl, UriKind.Absolute)))
                     {
                         put.Content = new ByteArrayContent(buffer, 0, read);
-                        put.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                        put.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
                         put.Content.Headers.ContentLength = read;
                         // IMPORTANT: Content-Range must be a content header so proxies/HttpClient don't strip it
                         put.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");
