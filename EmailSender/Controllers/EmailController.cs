@@ -17,6 +17,11 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
     private readonly IEmailSender _emailSender = emailSender;
     private readonly GraphOptions _graphOptions = graphOptions.Value;
 
+    // Reuse static arrays to avoid repeated allocations / analyzer warnings
+    private static readonly string[] GraphAllowedHosts = { "graph.microsoft.com" };
+    private static readonly string[] GraphScopes = { "https://graph.microsoft.com/.default" };
+    private static readonly string[] MessageSelect = { "id", "subject", "body", "receivedDateTime", "isRead", "hasAttachments", "webLink", "toRecipients", "ccRecipients", "bccRecipients", "internetMessageHeaders" };
+
     [HttpPost("send")] // multipart/form-data to support large attachments via streaming
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue, ValueLengthLimit = int.MaxValue)]
@@ -71,7 +76,7 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
 
         // Build GraphServiceClient using same approach as GraphEmailSender
         var credential = new ClientSecretCredential(_graphOptions.TenantId, _graphOptions.ClientId, _graphOptions.ClientSecret);
-        var authProvider = new AzureIdentityAuthenticationProvider(credential, new[] { "graph.microsoft.com" }, null, false, new[] { "https://graph.microsoft.com/.default" });
+        var authProvider = new AzureIdentityAuthenticationProvider(credential, GraphAllowedHosts, null, false, GraphScopes);
         var httpClient = GraphClientFactory.Create();
         var requestAdapter = new HttpClientRequestAdapter(authProvider, httpClient: httpClient);
         var graph = new GraphServiceClient(requestAdapter);
@@ -80,7 +85,7 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
         var messagesResponse = await graph.Users[user].MailFolders["inbox"].Messages.GetAsync(rc =>
         {
             rc.QueryParameters.Filter = "isRead eq false";
-            rc.QueryParameters.Select = new[] { "id", "subject", "body", "receivedDateTime", "isRead", "hasAttachments", "webLink", "toRecipients", "ccRecipients", "bccRecipients", "internetMessageHeaders" };
+            rc.QueryParameters.Select = MessageSelect;
             rc.QueryParameters.Top = 100;
         }, cancellationToken: ct);
 

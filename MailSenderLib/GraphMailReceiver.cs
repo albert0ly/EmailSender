@@ -127,6 +127,7 @@ namespace MailSenderLib
         private readonly GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
+        private static readonly string[] GraphScopes = new[] { "https://graph.microsoft.com/.default" };
 
         /// <summary>
         /// Creates a new instance with the provided Graph options.
@@ -149,7 +150,7 @@ namespace MailSenderLib
             var user = string.IsNullOrWhiteSpace(mailbox) ? _options.MailboxAddress : mailbox!;
             if (string.IsNullOrWhiteSpace(user)) throw new ArgumentException("Mailbox must be provided.", nameof(mailbox));
 
-            var token = await _credential.GetTokenAsync(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }), ct);
+            var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
 
             using var http = new HttpClient() { BaseAddress = GraphBaseUri };
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);

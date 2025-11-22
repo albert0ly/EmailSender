@@ -37,6 +37,10 @@ public class GraphEmailSender : IEmailSender
     private readonly GraphOptions _options;
     private readonly GraphServiceClient _graph;
 
+    // Reuse arrays to avoid allocating them on each call (fix CA1861)
+    private static readonly string[] GraphScopes = { "https://graph.microsoft.com/.default" };
+    private static readonly string[] GraphAllowedHosts = { "graph.microsoft.com" };
+
     public GraphEmailSender(IOptions<GraphOptions> options)
     {
         _options = options.Value;
@@ -45,12 +49,12 @@ public class GraphEmailSender : IEmailSender
             _options.TenantId,
             _options.ClientId,
             _options.ClientSecret);
-        var token = credential.GetToken(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }));
+        var token = credential.GetToken(new TokenRequestContext(GraphScopes));
         Console.WriteLine($"Token acquired, length={token.Token?.Length}");
 
         // For Microsoft.Graph v5 with Kiota pipeline
         // AzureIdentityAuthenticationProvider constructor expects allowed hosts (without http/https) as the second argument.
-        var authProvider = new AzureIdentityAuthenticationProvider(credential, new[] { "graph.microsoft.com" }, null, false, new[] { "https://graph.microsoft.com/.default" });
+        var authProvider = new AzureIdentityAuthenticationProvider(credential, GraphAllowedHosts, null, false, GraphScopes);
         var httpClient = GraphClientFactory.Create();
         var requestAdapter = new HttpClientRequestAdapter(authProvider, httpClient: httpClient);
         _graph = new GraphServiceClient(requestAdapter);
@@ -77,10 +81,8 @@ public class GraphEmailSender : IEmailSender
             ToRecipients = new List<Recipient>(to.Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }))
         };
 
-        if (cc != null)
-            message.CcRecipients = cc.Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();
-        if (bcc != null)
-            message.BccRecipients = bcc.Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();
+        message.CcRecipients = cc?.Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();
+        message.BccRecipients = bcc?.Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();
 
         // Create draft first
         var draft = await _graph.Users[_options.MailboxAddress].Messages.PostAsync(message, cancellationToken: cancellationToken);

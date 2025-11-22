@@ -70,6 +70,7 @@ namespace MailSenderLib
         private readonly GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
+        private static readonly string[] scopes = new[] { "https://graph.microsoft.com/.default" };
 
         /// <summary>
         /// Creates a new GraphMailSender.
@@ -109,7 +110,7 @@ namespace MailSenderLib
             if (toList.Count == 0) throw new ArgumentException("At least one recipient is required.", nameof(to));
 
             // Acquire token
-            var token = await _credential.GetTokenAsync(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }), cancellationToken);
+            var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), cancellationToken);
 
             using (var http = new HttpClient() { BaseAddress = GraphBaseUri })
             {
@@ -248,15 +249,6 @@ namespace MailSenderLib
             }
 
             Console.WriteLine("All chunks uploaded successfully.");
-        }
-
-
-
-
-        private static string EscapeJson(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
     }
 }
