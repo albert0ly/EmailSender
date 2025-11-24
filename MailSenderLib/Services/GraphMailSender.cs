@@ -1,7 +1,6 @@
 using Azure.Core;
 using Azure.Identity;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -10,6 +9,8 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using MailSenderLib.Options;
 
 namespace MailSenderLib.Services
@@ -125,15 +126,17 @@ namespace MailSenderLib.Services
             {
                 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
+                var internetMessageId = $"<{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid()}@{_optionsAuth.MailboxAddress.Split('@')[1]}>";
+
                 //1. Create draft message
-                var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml);
-                if (!_options.MoveToSentFolder)
-                    draftPayload =   "{ \"message\": " + draftPayload + ", \"saveToSentItems\": \"false\" }";
+                var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml, internetMessageId);
+                //if (!_options.MoveToSentFolder)
+                //    draftPayload =   "{ \"message\": " + draftPayload + ", \"saveToSentItems\": \"false\" }";
 
                 var draftResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages", new StringContent(draftPayload, System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
                 await EnsureSuccess(draftResp, "create draft", cancellationToken).ConfigureAwait(false);
                 var draftJson = await draftResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var draftIdMaybe = Newtonsoft.Json.Linq.JObject.Parse(draftJson).Value<string>("id");
+                var draftIdMaybe = JObject.Parse(draftJson).Value<string>("id");
                 if (string.IsNullOrWhiteSpace(draftIdMaybe)) throw new InvalidOperationException("Failed to obtain draft id.");
                 string draftId = draftIdMaybe!;
 
@@ -152,15 +155,17 @@ namespace MailSenderLib.Services
             }
         }
 
-        private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml)
+        private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml, string? internetMessageId=null)
         {
             string Escape(string s) => s?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
+
+            string internetMessageIdAddendum = internetMessageId != null ? $",\n \"internetMessageId\": \"{Escape(internetMessageId)}\"" : string.Empty;
 
             string Recipients(IEnumerable<string> addrs)
                 => string.Join(",", addrs.Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => "{\"emailAddress\":{\"address\":\"" + Escape(a.Trim()) + "\"}}"));
 
             var contentType = isHtml ? "HTML" : "Text";
-            var json = $"{{\n \"subject\": \"{Escape(subject)}\",\n \"body\": {{ \"contentType\": \"{contentType}\", \"content\": \"{Escape(body)}\" }},\n \"toRecipients\": [ {Recipients(to)} ],\n \"ccRecipients\": [ {Recipients(cc)} ],\n \"bccRecipients\": [ {Recipients(bcc)} ]\n}}";
+            var json = $"{{\n \"subject\": \"{Escape(subject)}\",\n \"body\": {{ \"contentType\": \"{contentType}\", \"content\": \"{Escape(body)}\" }},\n \"toRecipients\": [ {Recipients(to)} ],\n \"ccRecipients\": [ {Recipients(cc)} ],\n \"bccRecipients\": [ {Recipients(bcc)} ]\n {internetMessageIdAddendum}}}";
             return json;
         }
 
@@ -195,7 +200,7 @@ namespace MailSenderLib.Services
                 }
             };
 
-            var startSessionJson = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            var startSessionJson = JsonConvert.SerializeObject(payload);
             var sessionResp = await http.PostAsync(
                 $"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(draftId)}/attachments/createUploadSession",
                 new StringContent(startSessionJson, System.Text.Encoding.UTF8, "application/json"),
@@ -205,7 +210,7 @@ namespace MailSenderLib.Services
             await EnsureSuccess(sessionResp, "create upload session", ct).ConfigureAwait(false);
 
             var sessionJson = await sessionResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var uploadUrl = Newtonsoft.Json.Linq.JObject.Parse(sessionJson).Value<string>("uploadUrl");
+            var uploadUrl = JObject.Parse(sessionJson).Value<string>("uploadUrl");
 
             if (string.IsNullOrWhiteSpace(uploadUrl))
                 throw new InvalidOperationException("Upload session URL not found.");
