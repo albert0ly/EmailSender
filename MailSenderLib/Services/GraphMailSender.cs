@@ -10,6 +10,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
+using MailSenderLib.Options;
 
 namespace MailSenderLib.Services
 {
@@ -18,7 +19,8 @@ namespace MailSenderLib.Services
     /// </summary>
     public class GraphMailSender : Interfaces.IGraphMailSender, IDisposable
     {
-        private readonly MailSenderLib.Options.GraphMailOptions _options;
+        private readonly GraphMailOptionsAuth _optionsAuth;
+        private readonly GraphMailOptions _options;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
         private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
@@ -48,10 +50,11 @@ namespace MailSenderLib.Services
         private static readonly Action<ILogger, int, string, string, Exception?> _logChunkFailed =
             LoggerMessage.Define<int, string, string>(LogLevel.Error, new EventId(1014, nameof(_logChunkFailed)), "Chunk upload failed {Status} {Reason} - {Body}");
 
-        public GraphMailSender(MailSenderLib.Options.GraphMailOptions options, object? logger = null)
+        public GraphMailSender(GraphMailOptionsAuth optionsAuth, GraphMailOptions? options = null, object? logger = null)
         {
-            _options = options ?? throw new ArgumentNullException(nameof(options));
-            _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _options = options ?? new GraphMailOptions();
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger as ILogger<GraphMailSender>;
         }
 
@@ -124,7 +127,10 @@ namespace MailSenderLib.Services
 
                 //1. Create draft message
                 var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml);
-                var draftResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages", new StringContent(draftPayload, System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
+                if (!_options.MoveToSentFolder)
+                    draftPayload =   "{ \"message\": " + draftPayload + ", \"saveToSentItems\": \"false\" }";
+
+                var draftResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages", new StringContent(draftPayload, System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
                 await EnsureSuccess(draftResp, "create draft", cancellationToken).ConfigureAwait(false);
                 var draftJson = await draftResp.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var draftIdMaybe = Newtonsoft.Json.Linq.JObject.Parse(draftJson).Value<string>("id");
@@ -136,12 +142,12 @@ namespace MailSenderLib.Services
                 {
                     foreach (var att in attachments)
                     {
-                        await UploadAttachmentAsync(http, _options.MailboxAddress, draftId!, att.FileName, att.ContentType, att.ContentStream, cancellationToken).ConfigureAwait(false);
+                        await UploadAttachmentAsync(http, _optionsAuth.MailboxAddress, draftId!, att.FileName, att.ContentType, att.ContentStream, cancellationToken).ConfigureAwait(false);
                     }
                 }
 
                 //3. Send the message
-                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
+                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
                 await EnsureSuccess(sendResp, "send message", cancellationToken).ConfigureAwait(false);
             }
         }

@@ -50,9 +50,10 @@ namespace MailSenderLibTester
 
             // Move existing top-level controls into Send tab. We assume designer created these controls with known names.
             var sendControlNames = new[] {
-                "txtTenant","txtClientId","txtClientSecret","txtMailbox",
+                "txtTenant", "lblTenant", "txtClientId","txtClientSecret", "lblClientSecret", "lblClientId", "txtMailbox",
                 "txtTo","txtCc","txtBcc","txtSubject","txtBody",
-                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend"
+                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "checkSaveInSent","lblMailbox",
+                "lblTo","lblCc","lblBcc","lblSubject","lblBody"
             };
 
             foreach (var name in sendControlNames)
@@ -154,7 +155,7 @@ namespace MailSenderLibTester
             _lblRecvStatus.Text = "Fetching...";
             try
             {
-                var options = new GraphMailOptions
+                var options = new GraphMailOptionsAuth
                 {
                     TenantId = txtTenant != null ? txtTenant.Text.Trim() : string.Empty,
                     ClientId = txtClientId != null ? txtClientId.Text.Trim() : string.Empty,
@@ -241,14 +242,21 @@ namespace MailSenderLibTester
             lblStatus.Text = "Sending...";
             try
             {
-                var options = new GraphMailOptions
+                var optionsAuth = new GraphMailOptionsAuth
                 {
                     TenantId = txtTenant.Text.Trim(),
                     ClientId = txtClientId.Text.Trim(),
                     ClientSecret = txtClientSecret.Text.Trim(),
                     MailboxAddress = txtMailbox.Text.Trim()
                 };
-                var senderLib = new GraphMailSender(options);
+
+                var options = new GraphMailOptions
+                {
+                    MoveToSentFolder = checkSaveInSent.Checked,
+                    MarkAsRead = false  
+                };
+
+                var senderLib = new GraphMailSender(optionsAuth, options);
 
                 var to = SplitEmails(txtTo.Text);
                 var cc = SplitEmails(txtCc.Text);
@@ -362,6 +370,11 @@ namespace MailSenderLibTester
                 case ".png": return "image/png";
                 default: return "application/octet-stream";
             }
+        }
+
+        private void label1_Click(object sender, EventArgs e)
+        {
+
         }
     }
 }

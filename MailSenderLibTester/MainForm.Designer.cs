@@ -41,6 +41,7 @@ namespace MailSenderLibTester
             this.lstAttachments = new System.Windows.Forms.ListBox();
             this.btnSend = new System.Windows.Forms.Button();
             this.lblStatus = new System.Windows.Forms.Label();
+            this.checkSaveInSent = new System.Windows.Forms.CheckBox();
             this.SuspendLayout();
             // 
             // lblTenant
@@ -189,7 +190,7 @@ namespace MailSenderLibTester
             // lblBody
             // 
             this.lblBody.AutoSize = true;
-            this.lblBody.Location = new System.Drawing.Point(12, 229);
+            this.lblBody.Location = new System.Drawing.Point(12, 278);
             this.lblBody.Name = "lblBody";
             this.lblBody.Size = new System.Drawing.Size(34, 13);
             this.lblBody.TabIndex = 17;
@@ -197,7 +198,7 @@ namespace MailSenderLibTester
             // 
             // txtBody
             // 
-            this.txtBody.Location = new System.Drawing.Point(15, 245);
+            this.txtBody.Location = new System.Drawing.Point(15, 294);
             this.txtBody.Name = "txtBody";
             this.txtBody.Size = new System.Drawing.Size(655, 180);
             this.txtBody.TabIndex = 18;
@@ -206,7 +207,7 @@ namespace MailSenderLibTester
             // lblAttachments
             // 
             this.lblAttachments.AutoSize = true;
-            this.lblAttachments.Location = new System.Drawing.Point(12, 436);
+            this.lblAttachments.Location = new System.Drawing.Point(12, 485);
             this.lblAttachments.Name = "lblAttachments";
             this.lblAttachments.Size = new System.Drawing.Size(69, 13);
             this.lblAttachments.TabIndex = 19;
@@ -214,7 +215,7 @@ namespace MailSenderLibTester
             // 
             // btnAddAttachment
             // 
-            this.btnAddAttachment.Location = new System.Drawing.Point(130, 431);
+            this.btnAddAttachment.Location = new System.Drawing.Point(130, 480);
             this.btnAddAttachment.Name = "btnAddAttachment";
             this.btnAddAttachment.Size = new System.Drawing.Size(120, 23);
             this.btnAddAttachment.TabIndex = 20;
@@ -225,14 +226,14 @@ namespace MailSenderLibTester
             // lstAttachments
             // 
             this.lstAttachments.FormattingEnabled = true;
-            this.lstAttachments.Location = new System.Drawing.Point(256, 431);
+            this.lstAttachments.Location = new System.Drawing.Point(256, 480);
             this.lstAttachments.Name = "lstAttachments";
             this.lstAttachments.Size = new System.Drawing.Size(414, 95);
             this.lstAttachments.TabIndex = 21;
             // 
             // btnSend
             // 
-            this.btnSend.Location = new System.Drawing.Point(15, 468);
+            this.btnSend.Location = new System.Drawing.Point(12, 552);
             this.btnSend.Name = "btnSend";
             this.btnSend.Size = new System.Drawing.Size(120, 23);
             this.btnSend.TabIndex = 22;
@@ -243,17 +244,28 @@ namespace MailSenderLibTester
             // lblStatus
             // 
             this.lblStatus.AutoSize = true;
-            this.lblStatus.Location = new System.Drawing.Point(12, 509);
+            this.lblStatus.Location = new System.Drawing.Point(12, 511);
             this.lblStatus.Name = "lblStatus";
             this.lblStatus.Size = new System.Drawing.Size(10, 13);
             this.lblStatus.TabIndex = 23;
             this.lblStatus.Text = "-";
             // 
+            // checkSaveInSent
+            // 
+            this.checkSaveInSent.AutoSize = true;
+            this.checkSaveInSent.Location = new System.Drawing.Point(130, 246);
+            this.checkSaveInSent.Name = "checkSaveInSent";
+            this.checkSaveInSent.Size = new System.Drawing.Size(115, 17);
+            this.checkSaveInSent.TabIndex = 25;
+            this.checkSaveInSent.Text = "Save in Sent Items";
+            this.checkSaveInSent.UseVisualStyleBackColor = true;
+            // 
             // MainForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(695, 570);
+            this.ClientSize = new System.Drawing.Size(695, 609);
+            this.Controls.Add(this.checkSaveInSent);
             this.Controls.Add(this.lblStatus);
             this.Controls.Add(this.btnSend);
             this.Controls.Add(this.lstAttachments);
@@ -311,5 +323,6 @@ namespace MailSenderLibTester
         private System.Windows.Forms.ListBox lstAttachments;
         private System.Windows.Forms.Button btnSend;
         private System.Windows.Forms.Label lblStatus;
+        private System.Windows.Forms.CheckBox checkSaveInSent;
     }
 }
