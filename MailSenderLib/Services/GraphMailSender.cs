@@ -1,17 +1,18 @@
 using Azure.Core;
 using Azure.Identity;
+using MailSenderLib.Options;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using MailSenderLib.Options;
 
 namespace MailSenderLib.Services
 {
@@ -149,11 +150,87 @@ namespace MailSenderLib.Services
                     }
                 }
 
-                //3. Send the message
-                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
+                //3. Send the message 
+                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);                
                 await EnsureSuccess(sendResp, "send message", cancellationToken).ConfigureAwait(false);
+
+                //4. Delete from Sent Items 
+                await DeleteSentMessageByInternetIdAsync(http, cancellationToken, _optionsAuth.MailboxAddress, internetMessageId).ConfigureAwait(false);
             }
         }
+
+
+        private async Task DeleteSentMessageByInternetIdAsync(
+            HttpClient http,
+            CancellationToken ct,
+            string mailbox,
+            string internetMessageId)
+        {
+            // URL-encode the mailbox
+            string encodedMailbox = Uri.EscapeDataString(mailbox);
+
+            // Initial request URL to SentItems
+            string url = $"users/{encodedMailbox}/mailFolders/SentItems/messages?$select=id,internetMessageId&$top=50";
+
+            while (!string.IsNullOrEmpty(url))
+            {
+                using var resp = await http.GetAsync(url, ct).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    throw new Exception($"Failed to list messages: {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}");
+                }
+
+                string json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("value", out var items))
+                {
+                    // No messages found
+                    return;
+                }
+
+                foreach (var msg in items.EnumerateArray())
+                {
+                    if (!msg.TryGetProperty("internetMessageId", out var imIdProp))
+                        continue;
+
+                    string msgInternetId = imIdProp.GetString();
+                    if (string.Equals(msgInternetId, internetMessageId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string messageId = msg.GetProperty("id").GetString();
+
+                        // Delete the message
+                        string deleteUrl = $"users/{encodedMailbox}/mailFolders/SentItems/messages/{Uri.EscapeDataString(messageId)}";
+                        using var deleteResp = await http.DeleteAsync(deleteUrl, ct).ConfigureAwait(false);
+                        if (!deleteResp.IsSuccessStatusCode)
+                        {
+                            string body = await deleteResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            throw new Exception($"Delete failed: {(int)deleteResp.StatusCode} {deleteResp.ReasonPhrase} - {body}");
+                        }
+
+                        return; // Deleted successfully
+                    }
+                }
+
+                // Check for @odata.nextLink for paging
+                if (root.TryGetProperty("@odata.nextLink", out var nextLinkProp))
+                {
+                    url = nextLinkProp.GetString();
+                }
+                else
+                {
+                    url = null;
+                }
+            }
+
+            // Message not found — silently return
+        }
+
+
+
+
 
         private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml, string? internetMessageId=null)
         {
@@ -264,6 +341,7 @@ namespace MailSenderLib.Services
                     }
                 }
             }
+
 
             if (_logger != null) _logUploadComplete(_logger, fileName, null);
         }
