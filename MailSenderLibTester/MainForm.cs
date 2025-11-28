@@ -1,17 +1,18 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using System.Configuration;
 using MailSenderLib;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
 using MailSenderLib.Services;
+using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Configuration;
 using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Net.Mail;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace MailSenderLibTester
 {
@@ -268,14 +269,47 @@ namespace MailSenderLibTester
                 var streams = new List<Stream>();
                 try
                 {
-                    var atts = _attachmentPaths.Select(p =>
+                    //var atts = _attachmentPaths.Select(p =>
+                    //{
+                    //    var s = (Stream)File.OpenRead(p);
+                    //    streams.Add(s);
+                    //    return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
+                    //}).ToList();
+
+
+                    var attachments = new List<EmailAttachment>
                     {
-                        var s = (Stream)File.OpenRead(p);
-                        streams.Add(s);
-                        return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
+                        new EmailAttachment
+                        {
+                            FileName = "large_file.pdf",
+                            FilePath = @"C:\path\to\large_file.pdf"
+                        },
+                        new EmailAttachment
+                        {
+                            FileName = "document.docx",
+                            FilePath = @"C:\path\to\document.docx"
+                        }
+                    };
+
+                    var attachments1 = _attachmentPaths.Select(a => new EmailAttachment
+                    {
+                        FileName = Path.GetFileName(a),
+                        FilePath = a
                     }).ToList();
 
-                    await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
+                 //   await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
+
+                    var mailService = new GraphMailService(optionsAuth.TenantId, optionsAuth.ClientId, optionsAuth.ClientSecret);
+
+                    await mailService.SendMailWithLargeAttachmentsAsync(
+                        fromEmail: optionsAuth.MailboxAddress,
+                        toEmails: to,
+                        subject: subject,
+                        body: body,
+                        attachments: attachments1,
+                        ccEmails:cc,
+                        isHtml: isHtml
+                    );
                 }
                 finally
                 {
