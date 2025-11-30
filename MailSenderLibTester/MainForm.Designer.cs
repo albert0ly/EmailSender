@@ -42,6 +42,7 @@ namespace MailSenderLibTester
             this.btnSend = new System.Windows.Forms.Button();
             this.lblStatus = new System.Windows.Forms.Label();
             this.checkSaveInSent = new System.Windows.Forms.CheckBox();
+            this.btnSend2 = new System.Windows.Forms.Button();
             this.SuspendLayout();
             // 
             // lblTenant
@@ -233,11 +234,11 @@ namespace MailSenderLibTester
             // 
             // btnSend
             // 
-            this.btnSend.Location = new System.Drawing.Point(12, 552);
+            this.btnSend.Location = new System.Drawing.Point(15, 509);
             this.btnSend.Name = "btnSend";
             this.btnSend.Size = new System.Drawing.Size(120, 23);
             this.btnSend.TabIndex = 22;
-            this.btnSend.Text = "Send";
+            this.btnSend.Text = "Send 1";
             this.btnSend.UseVisualStyleBackColor = true;
             this.btnSend.Click += new System.EventHandler(this.btnSend_Click);
             // 
@@ -260,11 +261,22 @@ namespace MailSenderLibTester
             this.checkSaveInSent.Text = "Save in Sent Items";
             this.checkSaveInSent.UseVisualStyleBackColor = true;
             // 
+            // btnSend2
+            // 
+            this.btnSend2.Location = new System.Drawing.Point(15, 538);
+            this.btnSend2.Name = "btnSend2";
+            this.btnSend2.Size = new System.Drawing.Size(120, 23);
+            this.btnSend2.TabIndex = 26;
+            this.btnSend2.Text = "Send 2";
+            this.btnSend2.UseVisualStyleBackColor = true;
+            this.btnSend2.Click += new System.EventHandler(this.btnSend2_Click);
+            // 
             // MainForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(695, 609);
+            this.Controls.Add(this.btnSend2);
             this.Controls.Add(this.checkSaveInSent);
             this.Controls.Add(this.lblStatus);
             this.Controls.Add(this.btnSend);
@@ -324,5 +336,6 @@ namespace MailSenderLibTester
         private System.Windows.Forms.Button btnSend;
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.CheckBox checkSaveInSent;
+        private System.Windows.Forms.Button btnSend2;
     }
 }

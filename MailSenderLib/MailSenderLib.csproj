@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <LangVersion>8.0</LangVersion>
     <Nullable>enable</Nullable>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <GenerateDocumentationFile>False</GenerateDocumentationFile>
 
     <!-- Keep AssemblyVersion stable for compatibility; only bump manually on breaking changes -->
     <AssemblyVersion>1.0.0.0</AssemblyVersion>

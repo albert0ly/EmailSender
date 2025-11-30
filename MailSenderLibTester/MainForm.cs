@@ -53,7 +53,7 @@ namespace MailSenderLibTester
             var sendControlNames = new[] {
                 "txtTenant", "lblTenant", "txtClientId","txtClientSecret", "lblClientSecret", "lblClientId", "txtMailbox",
                 "txtTo","txtCc","txtBcc","txtSubject","txtBody",
-                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "checkSaveInSent","lblMailbox",
+                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "btnSend2", "checkSaveInSent","lblMailbox",
                 "lblTo","lblCc","lblBcc","lblSubject","lblBody"
             };
 
@@ -269,47 +269,15 @@ namespace MailSenderLibTester
                 var streams = new List<Stream>();
                 try
                 {
-                    //var atts = _attachmentPaths.Select(p =>
-                    //{
-                    //    var s = (Stream)File.OpenRead(p);
-                    //    streams.Add(s);
-                    //    return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
-                    //}).ToList();
-
-
-                    var attachments = new List<EmailAttachment>
+                    var atts = _attachmentPaths.Select(p =>
                     {
-                        new EmailAttachment
-                        {
-                            FileName = "large_file.pdf",
-                            FilePath = @"C:\path\to\large_file.pdf"
-                        },
-                        new EmailAttachment
-                        {
-                            FileName = "document.docx",
-                            FilePath = @"C:\path\to\document.docx"
-                        }
-                    };
-
-                    var attachments1 = _attachmentPaths.Select(a => new EmailAttachment
-                    {
-                        FileName = Path.GetFileName(a),
-                        FilePath = a
+                        var s = (Stream)File.OpenRead(p);
+                        streams.Add(s);
+                        return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
                     }).ToList();
 
-                 //   await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
+                    await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
 
-                    var mailService = new GraphMailService(optionsAuth.TenantId, optionsAuth.ClientId, optionsAuth.ClientSecret);
-
-                    await mailService.SendMailWithLargeAttachmentsAsync(
-                        fromEmail: optionsAuth.MailboxAddress,
-                        toEmails: to,
-                        subject: subject,
-                        body: body,
-                        attachments: attachments1,
-                        ccEmails:cc,
-                        isHtml: isHtml
-                    );
                 }
                 finally
                 {
@@ -409,6 +377,69 @@ namespace MailSenderLibTester
         private void label1_Click(object sender, EventArgs e)
         {
 
+        }
+
+        private async void btnSend2_Click(object sender, EventArgs e)
+        {
+            btnSend2.Enabled = false;
+            lblStatus.Text = "Sending...";
+            try
+            {
+                var optionsAuth = new GraphMailOptionsAuth
+                {
+                    TenantId = txtTenant.Text.Trim(),
+                    ClientId = txtClientId.Text.Trim(),
+                    ClientSecret = txtClientSecret.Text.Trim(),
+                    MailboxAddress = txtMailbox.Text.Trim()
+                };
+
+                var options = new GraphMailOptions
+                {
+                    MoveToSentFolder = checkSaveInSent.Checked,
+                    MarkAsRead = false
+                };
+
+                var to = SplitEmails(txtTo.Text);
+                var cc = SplitEmails(txtCc.Text);
+                var bcc = SplitEmails(txtBcc.Text);
+                var subject = txtSubject.Text;
+                var body = txtBody.Text;
+                var isHtml = chkIsHtml.Checked;
+
+                try
+                {
+                    var attachments1 = _attachmentPaths.Select(a => new EmailAttachment
+                    {
+                        FileName = Path.GetFileName(a),
+                        FilePath = a
+                    }).ToList();
+
+                    var mailService = new GraphMailService(optionsAuth.TenantId, optionsAuth.ClientId, optionsAuth.ClientSecret);
+
+                    await mailService.SendMailWithLargeAttachmentsAsync(
+                        fromEmail: optionsAuth.MailboxAddress,
+                        toEmails: to,
+                        subject: subject,
+                        body: body,
+                        attachments: attachments1,
+                        ccEmails: cc,
+                        isHtml: isHtml
+                    );
+                }
+                finally
+                {
+
+                }
+                lblStatus.Text = "Sent";
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = ex.Message;
+            }
+            finally
+            {
+                btnSend2.Enabled = true;
+            }
         }
     }
 }
