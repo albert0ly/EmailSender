@@ -229,7 +229,7 @@ namespace MailSenderLibTester
             this.lstAttachments.FormattingEnabled = true;
             this.lstAttachments.Location = new System.Drawing.Point(256, 480);
             this.lstAttachments.Name = "lstAttachments";
-            this.lstAttachments.Size = new System.Drawing.Size(414, 95);
+            this.lstAttachments.Size = new System.Drawing.Size(414, 82);
             this.lstAttachments.TabIndex = 21;
             // 
             // btnSend
@@ -245,7 +245,7 @@ namespace MailSenderLibTester
             // lblStatus
             // 
             this.lblStatus.AutoSize = true;
-            this.lblStatus.Location = new System.Drawing.Point(12, 511);
+            this.lblStatus.Location = new System.Drawing.Point(12, 587);
             this.lblStatus.Name = "lblStatus";
             this.lblStatus.Size = new System.Drawing.Size(10, 13);
             this.lblStatus.TabIndex = 23;

@@ -5,54 +5,99 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Microsoft.Extensions.Logging;
 
 namespace MailSenderLib.Services
 {
-    public class GraphMailService
+    public class GraphMailService : IDisposable
     {
         private readonly string _tenantId;
         private readonly string _clientId;
         private readonly string _clientSecret;
-        private string _accessToken;
+        private readonly ILogger<GraphMailService> _logger;
         private readonly HttpClient _httpClient;
 
-        public GraphMailService(string tenantId, string clientId, string clientSecret)
+        // Token caching with expiration
+        private string _accessToken;
+        private DateTimeOffset _tokenExpiration;
+        private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
+        private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
+
+        public GraphMailService(
+            string tenantId,
+            string clientId,
+            string clientSecret,
+            ILogger<GraphMailService> logger = null)
         {
-            _tenantId = tenantId;
-            _clientId = clientId;
-            _clientSecret = clientSecret;
+            _tenantId = tenantId ?? throw new ArgumentNullException(nameof(tenantId));
+            _clientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
+            _clientSecret = clientSecret ?? throw new ArgumentNullException(nameof(clientSecret));
+            _logger = logger;
             _httpClient = new HttpClient();
         }
 
         /// <summary>
-        /// Get access token using client credentials flow
+        /// Get access token using client credentials flow with proper caching and expiration handling
         /// </summary>
         private async Task<string> GetAccessTokenAsync()
         {
-            if (!string.IsNullOrEmpty(_accessToken))
-                return _accessToken;
-
-            var tokenUrl = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
-
-            var content = new FormUrlEncodedContent(new[]
+            // Fast path: check if cached token is still valid
+            if (!string.IsNullOrEmpty(_accessToken) &&
+                _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
             {
-                new KeyValuePair<string, string>("client_id", _clientId),
-                new KeyValuePair<string, string>("client_secret", _clientSecret),
-                new KeyValuePair<string, string>("scope", "https://graph.microsoft.com/.default"),
-                new KeyValuePair<string, string>("grant_type", "client_credentials")
-            });
+                return _accessToken;
+            }
 
-            var response = await _httpClient.PostAsync(tokenUrl, content);
-            response.EnsureSuccessStatusCode();
+            // Acquire lock for token refresh
+            await _tokenLock.WaitAsync();
+            try
+            {
+                // Double-check after acquiring lock
+                if (!string.IsNullOrEmpty(_accessToken) &&
+                    _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
+                {
+                    return _accessToken;
+                }
 
-            var responseBody = await response.Content.ReadAsStringAsync();
-            var tokenResponse = JObject.Parse(responseBody);
-            _accessToken = tokenResponse["access_token"].ToString();
+                _logger?.LogDebug("Refreshing access token");
 
-            return _accessToken;
+                var tokenUrl = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
+
+                var content = new FormUrlEncodedContent(new[]
+                {
+                    new KeyValuePair<string, string>("client_id", _clientId),
+                    new KeyValuePair<string, string>("client_secret", _clientSecret),
+                    new KeyValuePair<string, string>("scope", "https://graph.microsoft.com/.default"),
+                    new KeyValuePair<string, string>("grant_type", "client_credentials")
+                });
+
+                var response = await _httpClient.PostAsync(tokenUrl, content);
+                response.EnsureSuccessStatusCode();
+
+                var responseBody = await response.Content.ReadAsStringAsync();
+                var tokenResponse = JObject.Parse(responseBody);
+
+                _accessToken = tokenResponse["access_token"].ToString();
+                var expiresIn = tokenResponse["expires_in"].Value<int>();
+                _tokenExpiration = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
+
+                _logger?.LogDebug("Access token acquired, expires at {ExpiresAt}", _tokenExpiration);
+
+                return _accessToken;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to acquire access token");
+                throw;
+            }
+            finally
+            {
+                _tokenLock.Release();
+            }
         }
 
         /// <summary>
@@ -73,40 +118,38 @@ namespace MailSenderLib.Services
                 _httpClient.DefaultRequestHeaders.Authorization =
                     new AuthenticationHeaderValue("Bearer", token);
 
-                // Step 1: Create draft message
+                _logger?.LogInformation("Sending email from {From} to {ToCount} recipients",
+                    fromEmail, toEmails.Count);
+
+                // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
 
-                var message = new Dictionary<string, object>
+                var message = new MessagePayload
                 {
-                    ["subject"] = subject,
-                    ["body"] = new Dictionary<string, string>
+                    Subject = subject,
+                    Body = new BodyPayload
                     {
-                        ["contentType"] = isHtml ? "HTML" : "Text",
-                        ["content"] = body
+                        ContentType = isHtml ? "HTML" : "Text",
+                        Content = body
                     },
-                    ["toRecipients"] = toEmails.Select(email => new Dictionary<string, object>
+                    ToRecipients = toEmails.Select(email => new RecipientPayload
                     {
-                        ["emailAddress"] = new Dictionary<string, string>
-                        {
-                            ["address"] = email
-                        }
+                        EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList()
                 };
 
                 if (ccEmails != null && ccEmails.Any())
                 {
-                    message["ccRecipients"] = ccEmails.Select(email => new Dictionary<string, object>
+                    message.CcRecipients = ccEmails.Select(email => new RecipientPayload
                     {
-                        ["emailAddress"] = new Dictionary<string, string>
-                        {
-                            ["address"] = email
-                        }
+                        EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList();
                 }
 
                 var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
                 {
-                    NullValueHandling = NullValueHandling.Ignore
+                    NullValueHandling = NullValueHandling.Ignore,
+                    ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
                 });
                 var messageContent = new StringContent(messageJson, Encoding.UTF8, "application/json");
 
@@ -114,6 +157,7 @@ namespace MailSenderLib.Services
                 if (!messageResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(messageResponse);
+                    _logger?.LogError("Failed to create message: {Error}", error);
                     throw new Exception($"Failed to create message: {error}");
                 }
 
@@ -121,23 +165,29 @@ namespace MailSenderLib.Services
                 var createdMessage = JObject.Parse(messageResponseBody);
                 var messageId = createdMessage["id"].ToString();
 
-                Console.WriteLine($"Draft message created: {messageId}");
+                _logger?.LogDebug("Draft message created: {MessageId}", messageId);
 
-                // Step 2: Attach files
-                foreach (var attachment in attachments)
+                // Step 2: Attach files (stream large files, direct upload small files)
+                if (attachments != null && attachments.Any())
                 {
-                    var fileBytes = File.ReadAllBytes(attachment.FilePath);
-                    var fileSize = fileBytes.Length;
+                    foreach (var attachment in attachments)
+                    {
+                        var fileInfo = new FileInfo(attachment.FilePath);
+                        var fileSize = fileInfo.Length;
 
-                    if (fileSize > 3 * 1024 * 1024) // > 3MB
-                    {
-                        await UploadLargeAttachmentAsync(fromEmail, messageId,
-                            attachment.FileName, fileBytes);
-                    }
-                    else
-                    {
-                        await AddSmallAttachmentAsync(fromEmail, messageId,
-                            attachment.FileName, fileBytes);
+                        _logger?.LogDebug("Attaching file {FileName} ({Size} bytes)",
+                            attachment.FileName, fileSize);
+
+                        if (fileSize > 3 * 1024 * 1024) // > 3MB
+                        {
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId,
+                                attachment.FileName, attachment.FilePath, fileSize);
+                        }
+                        else
+                        {
+                            await AddSmallAttachmentAsync(fromEmail, messageId,
+                                attachment.FileName, attachment.FilePath);
+                        }
                     }
                 }
 
@@ -149,63 +199,16 @@ namespace MailSenderLib.Services
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync();
                 var completeMessage = JObject.Parse(completeMessageBody);
 
-                // Remove metadata and read-only fields that Graph API doesn't accept in sendMail
-                var cleanMessage = new JObject();
-
-                // Copy only the fields needed for sending
-                if (completeMessage["subject"] != null)
-                    cleanMessage["subject"] = completeMessage["subject"];
-                if (completeMessage["body"] != null)
-                    cleanMessage["body"] = completeMessage["body"];
-                if (completeMessage["toRecipients"] != null)
-                    cleanMessage["toRecipients"] = completeMessage["toRecipients"];
-                if (completeMessage["ccRecipients"] != null)
-                    cleanMessage["ccRecipients"] = completeMessage["ccRecipients"];
-                if (completeMessage["bccRecipients"] != null)
-                    cleanMessage["bccRecipients"] = completeMessage["bccRecipients"];
-                if (completeMessage["replyTo"] != null)
-                    cleanMessage["replyTo"] = completeMessage["replyTo"];
-                if (completeMessage["from"] != null)
-                    cleanMessage["from"] = completeMessage["from"];
-                if (completeMessage["importance"] != null)
-                    cleanMessage["importance"] = completeMessage["importance"];
-
-                // Clean attachments - remove metadata fields
-                if (completeMessage["attachments"] != null)
-                {
-                    var attachmentsArray = completeMessage["attachments"] as JArray;
-                    if (attachmentsArray != null && attachmentsArray.Count > 0)
-                    {
-                        var cleanAttachments = new JArray();
-                        foreach (JObject att in attachmentsArray)
-                        {
-                            var cleanAtt = new JObject();
-
-                            // Copy only necessary fields
-                            if (att["@odata.type"] != null)
-                                cleanAtt["@odata.type"] = att["@odata.type"];
-                            if (att["name"] != null)
-                                cleanAtt["name"] = att["name"];
-                            if (att["contentType"] != null)
-                                cleanAtt["contentType"] = att["contentType"];
-                            if (att["contentBytes"] != null)
-                                cleanAtt["contentBytes"] = att["contentBytes"];
-                            if (att["size"] != null)
-                                cleanAtt["size"] = att["size"];
-
-                            cleanAttachments.Add(cleanAtt);
-                        }
-                        cleanMessage["attachments"] = cleanAttachments;
-                    }
-                }
+                // Remove metadata and read-only fields
+                var cleanMessage = CleanMessageForSending(completeMessage);
 
                 // Step 4: Send using sendMail endpoint with SaveToSentItems = false
                 var sendUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/sendMail";
 
-                var sendPayload = new Dictionary<string, object>
+                var sendPayload = new
                 {
-                    ["message"] = cleanMessage,
-                    ["saveToSentItems"] = false
+                    message = cleanMessage,
+                    saveToSentItems = false
                 };
 
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
@@ -215,47 +218,112 @@ namespace MailSenderLib.Services
                 if (!sendResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(sendResponse);
+                    _logger?.LogError("Failed to send message: {Error}", error);
                     throw new Exception($"Failed to send message: {error}");
                 }
 
-                // Step 5: Delete the draft message since we don't need it anymore
+                // Step 5: Delete the draft message
                 var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
-                await _httpClient.DeleteAsync(deleteUrl);
+                var deleteResponse = await _httpClient.DeleteAsync(deleteUrl);
 
-                Console.WriteLine("Message sent successfully without saving to Sent Items");
+                if (!deleteResponse.IsSuccessStatusCode)
+                {
+                    _logger?.LogWarning("Failed to delete draft message {MessageId}", messageId);
+                }
+
+                _logger?.LogInformation("Message sent successfully without saving to Sent Items");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending email: {ex.Message}");
+                _logger?.LogError(ex, "Error sending email");
                 throw;
             }
         }
 
+        private JObject CleanMessageForSending(JObject completeMessage)
+        {
+            var cleanMessage = new JObject();
+
+            // Copy only the fields needed for sending
+            if (completeMessage["subject"] != null)
+                cleanMessage["subject"] = completeMessage["subject"];
+            if (completeMessage["body"] != null)
+                cleanMessage["body"] = completeMessage["body"];
+            if (completeMessage["toRecipients"] != null)
+                cleanMessage["toRecipients"] = completeMessage["toRecipients"];
+            if (completeMessage["ccRecipients"] != null)
+                cleanMessage["ccRecipients"] = completeMessage["ccRecipients"];
+            if (completeMessage["bccRecipients"] != null)
+                cleanMessage["bccRecipients"] = completeMessage["bccRecipients"];
+            if (completeMessage["replyTo"] != null)
+                cleanMessage["replyTo"] = completeMessage["replyTo"];
+            if (completeMessage["from"] != null)
+                cleanMessage["from"] = completeMessage["from"];
+            if (completeMessage["importance"] != null)
+                cleanMessage["importance"] = completeMessage["importance"];
+
+            // Clean attachments - remove metadata fields
+            if (completeMessage["attachments"] != null)
+            {
+                var attachmentsArray = completeMessage["attachments"] as JArray;
+                if (attachmentsArray != null && attachmentsArray.Count > 0)
+                {
+                    var cleanAttachments = new JArray();
+                    foreach (JObject att in attachmentsArray)
+                    {
+                        var cleanAtt = new JObject();
+
+                        if (att["@odata.type"] != null)
+                            cleanAtt["@odata.type"] = att["@odata.type"];
+                        if (att["name"] != null)
+                            cleanAtt["name"] = att["name"];
+                        if (att["contentType"] != null)
+                            cleanAtt["contentType"] = att["contentType"];
+                        if (att["contentBytes"] != null)
+                            cleanAtt["contentBytes"] = att["contentBytes"];
+                        if (att["size"] != null)
+                            cleanAtt["size"] = att["size"];
+
+                        cleanAttachments.Add(cleanAtt);
+                    }
+                    cleanMessage["attachments"] = cleanAttachments;
+                }
+            }
+
+            return cleanMessage;
+        }
+
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
-            string fileName, byte[] fileBytes)
+            string fileName, string filePath)
         {
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
 
-            var attachment = new Dictionary<string, object>
+            // Read file and encode to base64
+            var fileBytes = File.ReadAllBytes(filePath);
+            var base64Content = Convert.ToBase64String(fileBytes);
+
+            var attachment = new
             {
-                ["@odata.type"] = "#microsoft.graph.fileAttachment",
-                ["name"] = fileName,
-                ["contentBytes"] = Convert.ToBase64String(fileBytes)
+                odataType = "#microsoft.graph.fileAttachment",
+                name = fileName,
+                contentBytes = base64Content
             };
 
-            var json = JsonConvert.SerializeObject(attachment);
+            var json = JsonConvert.SerializeObject(attachment, new JsonSerializerSettings
+            {
+                ContractResolver = new ODataContractResolver()
+            });
+
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync(attachUrl, content);
             response.EnsureSuccessStatusCode();
 
-            Console.WriteLine($"Small attachment added: {fileName}");
+            _logger?.LogDebug("Small attachment added: {FileName}", fileName);
         }
 
-        private async Task UploadLargeAttachmentAsync(string fromEmail, string messageId,
-            string fileName, byte[] fileBytes)
+        private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
+            string fileName, string filePath, long fileSize)
         {
-            var fileSize = fileBytes.Length;
-
             // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
 
@@ -279,39 +347,60 @@ namespace MailSenderLib.Services
             var sessionInfo = JObject.Parse(sessionResponseBody);
             var uploadUrl = sessionInfo["uploadUrl"].ToString();
 
-            // Upload in chunks (4MB chunks recommended)
-            int chunkSize = 4 * 1024 * 1024; // 4MB
-            int offset = 0;
+            _logger?.LogDebug("Upload session created for {FileName}", fileName);
 
+            // Upload in chunks using streaming (5MB chunks)
+            int chunkSize = 5 * 1024 * 1024; // 5MB
+            byte[] buffer = new byte[chunkSize];
+            long offset = 0;
+
+            using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
             using (var uploadClient = new HttpClient())
             {
                 while (offset < fileSize)
                 {
-                    int end = Math.Min(offset + chunkSize, fileSize);
-                    int chunkLength = end - offset;
-                    byte[] chunk = new byte[chunkLength];
-                    Array.Copy(fileBytes, offset, chunk, 0, chunkLength);
+                    int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length);
+                    if (bytesRead <= 0) break;
+
+                    long end = offset + bytesRead - 1;
 
                     var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
                     {
-                        Content = new ByteArrayContent(chunk)
+                        Content = new ByteArrayContent(buffer, 0, bytesRead)
                     };
 
                     request.Content.Headers.ContentType =
                         new MediaTypeHeaderValue("application/octet-stream");
-                    request.Content.Headers.ContentLength = chunkLength;
+                    request.Content.Headers.ContentLength = bytesRead;
                     request.Content.Headers.ContentRange =
-                        new ContentRangeHeaderValue(offset, end - 1, fileSize);
+                        new ContentRangeHeaderValue(offset, end, fileSize);
 
                     var response = await uploadClient.SendAsync(request);
-                    response.EnsureSuccessStatusCode();
 
-                    Console.WriteLine($"Uploaded {end}/{fileSize} bytes of {fileName}");
-                    offset = end;
+                    var responseBody = await response.Content.ReadAsStringAsync();
+
+                    _logger?.LogDebug("Uploaded {Current}/{Total} bytes of {FileName}",
+                        end + 1, fileSize, fileName);
+
+                    // 200/201 = complete, 202 = continue
+                    if ((int)response.StatusCode == 200 || (int)response.StatusCode == 201)
+                    {
+                        _logger?.LogDebug("Upload complete: {FileName}", fileName);
+                        return;
+                    }
+                    else if ((int)response.StatusCode != 202)
+                    {
+                        _logger?.LogError("Chunk upload failed: {Status} {Reason} - {Body}",
+                            (int)response.StatusCode, response.ReasonPhrase, responseBody);
+                        throw new InvalidOperationException(
+                            $"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {responseBody}");
+                    }
+
+                    offset = end + 1;
                 }
             }
 
-            Console.WriteLine($"Large attachment uploaded: {fileName}");
+            _logger?.LogDebug("Upload complete: {FileName}", fileName);
         }
 
         private async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
@@ -329,8 +418,45 @@ namespace MailSenderLib.Services
 
         public void Dispose()
         {
+            _tokenLock?.Dispose();
             _httpClient?.Dispose();
         }
+    }
+
+    // Custom contract resolver for @odata.type
+    internal class ODataContractResolver : Newtonsoft.Json.Serialization.DefaultContractResolver
+    {
+        protected override string ResolvePropertyName(string propertyName)
+        {
+            if (propertyName == "odataType")
+                return "@odata.type";
+            return base.ResolvePropertyName(propertyName);
+        }
+    }
+
+    // Strongly-typed payload classes for better performance and type safety
+    internal class MessagePayload
+    {
+        public string Subject { get; set; }
+        public BodyPayload Body { get; set; }
+        public List<RecipientPayload> ToRecipients { get; set; }
+        public List<RecipientPayload> CcRecipients { get; set; }
+    }
+
+    internal class BodyPayload
+    {
+        public string ContentType { get; set; }
+        public string Content { get; set; }
+    }
+
+    internal class RecipientPayload
+    {
+        public EmailAddressPayload EmailAddress { get; set; }
+    }
+
+    internal class EmailAddressPayload
+    {
+        public string Address { get; set; }
     }
 
     public class EmailAttachment
@@ -345,15 +471,19 @@ Compatible with .NET Standard 2.0
 
 Required NuGet Packages:
 - Newtonsoft.Json (>= 12.0.3)
+- Microsoft.Extensions.Logging.Abstractions (>= 2.1.0)
 
-Azure AD App Setup:
-1. Create App Registration in Azure AD
-2. Add Application Permission: Mail.Send
-3. Grant admin consent
-4. Create client secret
+Improvements:
+1. Streaming for large files - memory efficient
+2. Proper token caching with expiration handling
+3. ILogger integration for dependency injection
+4. Strongly-typed JSON classes for better performance
+5. Thread-safe token refresh with SemaphoreSlim
+6. Comprehensive logging throughout
 
 Usage Example:
-var mailService = new GraphMailService(tenantId, clientId, clientSecret);
+var logger = LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger<GraphMailService>();
+var mailService = new GraphMailService(tenantId, clientId, clientSecret, logger);
 
 var attachments = new List<EmailAttachment>
 {
