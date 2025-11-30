@@ -1,15 +1,18 @@
-﻿using System;
+﻿using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Mail;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using Microsoft.Extensions.Logging;
 
 namespace MailSenderLib.Services
 {
@@ -18,20 +21,56 @@ namespace MailSenderLib.Services
         private readonly string _tenantId;
         private readonly string _clientId;
         private readonly string _clientSecret;
-        private readonly ILogger<GraphMailService> _logger;
+        private readonly ILogger<GraphMailService>? _logger;
         private readonly HttpClient _httpClient;
 
         // Token caching with expiration
-        private string _accessToken;
+        private string? _accessToken;
         private DateTimeOffset _tokenExpiration;
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
+
+        // LoggerMessage delegates (avoid allocation-heavy LoggerExtensions calls)
+        private static readonly Action<ILogger, Exception?> _logFailedToAcquireToken =
+            LoggerMessage.Define(LogLevel.Error, new EventId(1000, nameof(_logFailedToAcquireToken)), "Failed to acquire access token for GraphMailSender");
+        private static readonly Action<ILogger, Exception?> _logRefreshingToken =
+            LoggerMessage.Define(LogLevel.Debug, new EventId(1001, nameof(_logRefreshingToken)), "Refreshing access token for GraphMailSender");
+        private static readonly Action<ILogger, DateTimeOffset, Exception?> _logTokenAcquired =
+            LoggerMessage.Define<DateTimeOffset>(LogLevel.Debug, new EventId(1002, nameof(_logTokenAcquired)), "Access token acquired, expires on {ExpiresOn}");
+        private static readonly Action<ILogger, string,int, Exception?> _logSendingEmail =
+                LoggerMessage.Define<string, int>(LogLevel.Debug, new EventId(1015, nameof(_logSendingEmail)), "Sending email from {From} to {ToCount} recipients");        
+        private static readonly Action<ILogger, string, Exception?> _logFailedToCreateMessage =
+          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1016, nameof(_logFailedToCreateMessage)), "Failed to create message: {Error}");
+        private static readonly Action<ILogger, string,  Exception?> _logDraftCreated =
+          LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1017, nameof(_logDraftCreated)), "Draft created {MessageId}");
+        private static readonly Action<ILogger, string, long, Exception?> _logAttachingFile =
+          LoggerMessage.Define<string, long>(LogLevel.Debug, new EventId(1018, nameof(_logAttachingFile)), "Attaching file {FileName} size {FileSize} recipients");        
+        private static readonly Action<ILogger, string, Exception?> _logFailedToSendMessage =
+          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1019, nameof(_logFailedToSendMessage)), "Failed to send message: {Error}");        
+        private static readonly Action<ILogger, string, string, Exception?> _logFailedToDeleteDraft =
+          LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1020, nameof(_logFailedToDeleteDraft)), "Failed to delete draft message {MessageId}, Error {Error}");
+        private static readonly Action<ILogger, string, Exception?> _logMessageSent =
+          LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1021, nameof(_logMessageSent)), "Message sent successfully without saving to Sent Items {MessageId}");
+        private static readonly Action<ILogger, string, string, Exception?> _logUploadSessionUrl =
+            LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(1013, nameof(_logUploadSessionUrl)), "Upload session URL: {Url} for file: {FileName}");
+        private static readonly Action<ILogger, long, long, string, int, Exception?> _logChunkStatus =
+            LoggerMessage.Define<long, long, string, int>(LogLevel.Debug, new EventId(1010, nameof(_logChunkStatus)), "Uploaded {Current}/{Total} bytes of {FileName}, Status {Status}");
+        private static readonly Action<ILogger, string, Exception?> _logSmallAttachmentAdded =
+            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1022, nameof(_logSmallAttachmentAdded)), "Small attachment added: {FileName}");
+        private static readonly Action<ILogger, string, Exception?> _logUploadComplete =
+            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1012, nameof(_logUploadComplete)), "Upload complete for {FileName}");
+        private static readonly Action<ILogger, int, string, string, Exception?> _logChunkFailed =
+            LoggerMessage.Define<int, string, string>(LogLevel.Error, new EventId(1014, nameof(_logChunkFailed)), "Chunk upload failed {Status} {Reason} - {Body}");
+
+
+        private static readonly Action<ILogger, string, Exception?> _logResponseBodyTrace =
+            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(_logResponseBodyTrace)), "{Body}");
 
         public GraphMailService(
             string tenantId,
             string clientId,
             string clientSecret,
-            ILogger<GraphMailService> logger = null)
+            ILogger<GraphMailService>? logger = null)
         {
             _tenantId = tenantId ?? throw new ArgumentNullException(nameof(tenantId));
             _clientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
@@ -49,7 +88,9 @@ namespace MailSenderLib.Services
             if (!string.IsNullOrEmpty(_accessToken) &&
                 _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
             {
+#pragma warning disable CS8603 // Possible null reference return.
                 return _accessToken;
+#pragma warning restore CS8603 // Possible null reference return.
             }
 
             // Acquire lock for token refresh
@@ -60,10 +101,12 @@ namespace MailSenderLib.Services
                 if (!string.IsNullOrEmpty(_accessToken) &&
                     _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
                 {
+#pragma warning disable CS8603 // Possible null reference return.
                     return _accessToken;
+#pragma warning restore CS8603 // Possible null reference return.
                 }
 
-                _logger?.LogDebug("Refreshing access token");
+                if (_logger != null) _logRefreshingToken(_logger, null);
 
                 var tokenUrl = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
 
@@ -81,17 +124,22 @@ namespace MailSenderLib.Services
                 var responseBody = await response.Content.ReadAsStringAsync();
                 var tokenResponse = JObject.Parse(responseBody);
 
-                _accessToken = tokenResponse["access_token"].ToString();
-                var expiresIn = tokenResponse["expires_in"].Value<int>();
+
+                var tokenObj = tokenResponse["access_token"];
+                _accessToken = tokenObj?.ToString() ?? throw new InvalidOperationException("Access token not found in response.");
+
+
+                var expiresObj = tokenResponse["expires_in"];
+                var expiresIn = expiresObj?.Value<int>() ?? throw new InvalidOperationException("expires_in is missing in tokenResponse.");
                 _tokenExpiration = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
-
-                _logger?.LogDebug("Access token acquired, expires at {ExpiresAt}", _tokenExpiration);
-
+               
+                if (_logger != null) _logTokenAcquired(_logger, _tokenExpiration, null);
                 return _accessToken;
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Failed to acquire access token");
+
+                if (_logger != null) _logFailedToAcquireToken(_logger, ex);
                 throw;
             }
             finally
@@ -103,13 +151,15 @@ namespace MailSenderLib.Services
         /// <summary>
         /// Send email with large attachments without saving to Sent Items
         /// </summary>
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "CA2201:Do not raise reserved exception types", Justification = "<Pending>")]
         public async Task SendMailWithLargeAttachmentsAsync(
             string fromEmail,
             List<string> toEmails,
             string subject,
             string body,
             List<EmailAttachment> attachments,
-            List<string> ccEmails = null,
+            List<string>? ccEmails = null,
+            List<string>? bccEmails = null,
             bool isHtml = true)
         {
             try
@@ -117,9 +167,7 @@ namespace MailSenderLib.Services
                 var token = await GetAccessTokenAsync();
                 _httpClient.DefaultRequestHeaders.Authorization =
                     new AuthenticationHeaderValue("Bearer", token);
-
-                _logger?.LogInformation("Sending email from {From} to {ToCount} recipients",
-                    fromEmail, toEmails.Count);
+                if (_logger != null) _logSendingEmail(_logger, fromEmail, toEmails.Count, null);
 
                 // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
@@ -138,9 +186,17 @@ namespace MailSenderLib.Services
                     }).ToList()
                 };
 
-                if (ccEmails != null && ccEmails.Any())
+                if (ccEmails != null && ccEmails.Count > 0)
                 {
                     message.CcRecipients = ccEmails.Select(email => new RecipientPayload
+                    {
+                        EmailAddress = new EmailAddressPayload { Address = email }
+                    }).ToList();
+                }
+
+                if (bccEmails != null && bccEmails.Count > 0)
+                {
+                    message.BccRecipients = bccEmails.Select(email => new RecipientPayload
                     {
                         EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList();
@@ -157,26 +213,26 @@ namespace MailSenderLib.Services
                 if (!messageResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(messageResponse);
-                    _logger?.LogError("Failed to create message: {Error}", error);
+      
+                    if (_logger != null) _logFailedToCreateMessage(_logger, error, null);
                     throw new Exception($"Failed to create message: {error}");
                 }
 
                 var messageResponseBody = await messageResponse.Content.ReadAsStringAsync();
                 var createdMessage = JObject.Parse(messageResponseBody);
-                var messageId = createdMessage["id"].ToString();
+                var messageId = createdMessage["id"]?.ToString() ?? throw new InvalidOperationException("Message ID not found in response");
 
-                _logger?.LogDebug("Draft message created: {MessageId}", messageId);
+                if (_logger != null) _logDraftCreated(_logger, messageId, null);              
 
                 // Step 2: Attach files (stream large files, direct upload small files)
-                if (attachments != null && attachments.Any())
+                if (attachments != null && attachments.Count > 0)
                 {
                     foreach (var attachment in attachments)
                     {
                         var fileInfo = new FileInfo(attachment.FilePath);
                         var fileSize = fileInfo.Length;
 
-                        _logger?.LogDebug("Attaching file {FileName} ({Size} bytes)",
-                            attachment.FileName, fileSize);
+                        if (_logger != null) _logAttachingFile(_logger, attachment.FileName, fileSize, null);
 
                         if (fileSize > 3 * 1024 * 1024) // > 3MB
                         {
@@ -218,7 +274,7 @@ namespace MailSenderLib.Services
                 if (!sendResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(sendResponse);
-                    _logger?.LogError("Failed to send message: {Error}", error);
+                    if (_logger != null) _logFailedToSendMessage(_logger, error, null);                    
                     throw new Exception($"Failed to send message: {error}");
                 }
 
@@ -228,19 +284,21 @@ namespace MailSenderLib.Services
 
                 if (!deleteResponse.IsSuccessStatusCode)
                 {
-                    _logger?.LogWarning("Failed to delete draft message {MessageId}", messageId);
+                    var error = await GetErrorDetailsAsync(deleteResponse);
+                    if (_logger != null) _logFailedToDeleteDraft(_logger, messageId, error, null);
+                    throw new Exception($"Failed to delete draft message {messageId}, Error {error}");
                 }
 
-                _logger?.LogInformation("Message sent successfully without saving to Sent Items");
+                if (_logger != null) _logMessageSent(_logger, messageId, null);                
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error sending email");
+                if (_logger != null) _logFailedToSendMessage(_logger, "", ex);
                 throw;
             }
         }
 
-        private JObject CleanMessageForSending(JObject completeMessage)
+        private static JObject CleanMessageForSending(JObject completeMessage)
         {
             var cleanMessage = new JObject();
 
@@ -265,26 +323,26 @@ namespace MailSenderLib.Services
             // Clean attachments - remove metadata fields
             if (completeMessage["attachments"] != null)
             {
-                var attachmentsArray = completeMessage["attachments"] as JArray;
-                if (attachmentsArray != null && attachmentsArray.Count > 0)
+                if (completeMessage["attachments"] is JArray attachmentsArray && attachmentsArray.Count > 0)
                 {
                     var cleanAttachments = new JArray();
-                    foreach (JObject att in attachmentsArray)
+                    foreach (var item in attachmentsArray)
                     {
-                        var cleanAtt = new JObject();
-
-                        if (att["@odata.type"] != null)
-                            cleanAtt["@odata.type"] = att["@odata.type"];
-                        if (att["name"] != null)
-                            cleanAtt["name"] = att["name"];
-                        if (att["contentType"] != null)
-                            cleanAtt["contentType"] = att["contentType"];
-                        if (att["contentBytes"] != null)
-                            cleanAtt["contentBytes"] = att["contentBytes"];
-                        if (att["size"] != null)
-                            cleanAtt["size"] = att["size"];
-
-                        cleanAttachments.Add(cleanAtt);
+                        if (item is JObject att)  // Explicit cast with pattern matching
+                        {
+                            var cleanAtt = new JObject();
+                            if (att["@odata.type"] != null)
+                                cleanAtt["@odata.type"] = att["@odata.type"];
+                            if (att["name"] != null)
+                                cleanAtt["name"] = att["name"];
+                            if (att["contentType"] != null)
+                                cleanAtt["contentType"] = att["contentType"];
+                            if (att["contentBytes"] != null)
+                                cleanAtt["contentBytes"] = att["contentBytes"];
+                            if (att["size"] != null)
+                                cleanAtt["size"] = att["size"];
+                            cleanAttachments.Add(cleanAtt);
+                        }
                     }
                     cleanMessage["attachments"] = cleanAttachments;
                 }
@@ -318,7 +376,7 @@ namespace MailSenderLib.Services
             var response = await _httpClient.PostAsync(attachUrl, content);
             response.EnsureSuccessStatusCode();
 
-            _logger?.LogDebug("Small attachment added: {FileName}", fileName);
+            if(_logger != null) _logSmallAttachmentAdded(_logger, fileName, null);                 
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
@@ -345,9 +403,9 @@ namespace MailSenderLib.Services
 
             var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync();
             var sessionInfo = JObject.Parse(sessionResponseBody);
-            var uploadUrl = sessionInfo["uploadUrl"].ToString();
-
-            _logger?.LogDebug("Upload session created for {FileName}", fileName);
+            var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");            
+   
+            if (_logger != null) _logUploadSessionUrl (_logger, uploadUrl, fileName, null);
 
             // Upload in chunks using streaming (5MB chunks)
             int chunkSize = 5 * 1024 * 1024; // 5MB
@@ -379,31 +437,28 @@ namespace MailSenderLib.Services
 
                     var responseBody = await response.Content.ReadAsStringAsync();
 
-                    _logger?.LogDebug("Uploaded {Current}/{Total} bytes of {FileName}",
-                        end + 1, fileSize, fileName);
+                    if (_logger != null) _logChunkStatus(_logger, end + 1, fileSize, fileName, (int)response.StatusCode, null);
 
                     // 200/201 = complete, 202 = continue
                     if ((int)response.StatusCode == 200 || (int)response.StatusCode == 201)
                     {
-                        _logger?.LogDebug("Upload complete: {FileName}", fileName);
+                        if(_logger != null) _logUploadComplete(_logger, fileName, null);                                               
                         return;
                     }
                     else if ((int)response.StatusCode != 202)
                     {
-                        _logger?.LogError("Chunk upload failed: {Status} {Reason} - {Body}",
-                            (int)response.StatusCode, response.ReasonPhrase, responseBody);
-                        throw new InvalidOperationException(
-                            $"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {responseBody}");
+                        if(_logger != null) _logChunkFailed(_logger, (int)response.StatusCode, response.ReasonPhrase ?? "", responseBody, null);
                     }
 
                     offset = end + 1;
                 }
             }
 
-            _logger?.LogDebug("Upload complete: {FileName}", fileName);
+            if (_logger != null) _logUploadComplete(_logger, fileName, null);
+            
         }
 
-        private async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
+        private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
         {
             try
             {
@@ -420,6 +475,7 @@ namespace MailSenderLib.Services
         {
             _tokenLock?.Dispose();
             _httpClient?.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 
@@ -437,32 +493,33 @@ namespace MailSenderLib.Services
     // Strongly-typed payload classes for better performance and type safety
     internal class MessagePayload
     {
-        public string Subject { get; set; }
-        public BodyPayload Body { get; set; }
+        public string? Subject { get; set; }
+        public BodyPayload? Body { get; set; }
         public List<RecipientPayload> ToRecipients { get; set; }
-        public List<RecipientPayload> CcRecipients { get; set; }
+        public List<RecipientPayload>? CcRecipients { get; set; }
+        public List<RecipientPayload>? BccRecipients { get; set; }
     }
 
     internal class BodyPayload
     {
-        public string ContentType { get; set; }
-        public string Content { get; set; }
+        public string ContentType { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
     }
 
     internal class RecipientPayload
     {
-        public EmailAddressPayload EmailAddress { get; set; }
+        public EmailAddressPayload? EmailAddress { get; set; }       
     }
 
     internal class EmailAddressPayload
     {
-        public string Address { get; set; }
+        public string Address { get; set; } = string.Empty;
     }
 
     public class EmailAttachment
     {
-        public string FileName { get; set; }
-        public string FilePath { get; set; }
+        public string FileName { get; set; } = string.Empty;
+        public string FilePath { get; set; } = string.Empty;
     }
 }
 
