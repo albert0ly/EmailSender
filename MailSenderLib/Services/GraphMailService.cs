@@ -18,11 +18,11 @@ namespace MailSenderLib.Services
         private readonly string _tenantId;
         private readonly string _clientId;
         private readonly string _clientSecret;
-        private readonly ILogger<GraphMailService> _logger;
+        private readonly ILogger<GraphMailService>? _logger;
         private readonly HttpClient _httpClient;
 
         // Token caching with expiration
-        private string _accessToken;
+        private string? _accessToken;
         private DateTimeOffset _tokenExpiration;
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
@@ -31,7 +31,7 @@ namespace MailSenderLib.Services
             string tenantId,
             string clientId,
             string clientSecret,
-            ILogger<GraphMailService> logger = null)
+            ILogger<GraphMailService>? logger = null)
         {
             _tenantId = tenantId ?? throw new ArgumentNullException(nameof(tenantId));
             _clientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
@@ -81,8 +81,22 @@ namespace MailSenderLib.Services
                 var responseBody = await response.Content.ReadAsStringAsync();
                 var tokenResponse = JObject.Parse(responseBody);
 
-                _accessToken = tokenResponse["access_token"].ToString();
-                var expiresIn = tokenResponse["expires_in"].Value<int>();
+               
+                var tokenObj = tokenResponse["access_token"];
+                if (tokenObj == null)
+                {
+                    // Log the error and stop
+                    throw new InvalidOperationException("Access token not found in response.");
+                }
+                _accessToken = tokenObj.ToString();
+
+
+                var expiresObj = tokenResponse["expires_in"];
+                if (expiresObj == null)
+                {
+                    throw new InvalidOperationException("expires_in is missing in tokenResponse.");
+                }
+                var expiresIn = expiresObj.Value<int>();
                 _tokenExpiration = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
 
                 _logger?.LogDebug("Access token acquired, expires at {ExpiresAt}", _tokenExpiration);
@@ -138,7 +152,7 @@ namespace MailSenderLib.Services
                     }).ToList()
                 };
 
-                if (ccEmails != null && ccEmails.Any())
+                if (ccEmails != null && ccEmails.Count > 0)
                 {
                     message.CcRecipients = ccEmails.Select(email => new RecipientPayload
                     {
@@ -168,7 +182,7 @@ namespace MailSenderLib.Services
                 _logger?.LogDebug("Draft message created: {MessageId}", messageId);
 
                 // Step 2: Attach files (stream large files, direct upload small files)
-                if (attachments != null && attachments.Any())
+                if (attachments != null && attachments.Count > 0)
                 {
                     foreach (var attachment in attachments)
                     {
@@ -240,7 +254,7 @@ namespace MailSenderLib.Services
             }
         }
 
-        private JObject CleanMessageForSending(JObject completeMessage)
+        private static JObject CleanMessageForSending(JObject completeMessage)
         {
             var cleanMessage = new JObject();
 
@@ -403,7 +417,7 @@ namespace MailSenderLib.Services
             _logger?.LogDebug("Upload complete: {FileName}", fileName);
         }
 
-        private async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
+        private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
         {
             try
             {
