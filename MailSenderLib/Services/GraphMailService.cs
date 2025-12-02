@@ -380,7 +380,7 @@ namespace MailSenderLib.Services
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize)
+    string fileName, string filePath, long fileSize)
         {
             // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
@@ -403,9 +403,9 @@ namespace MailSenderLib.Services
 
             var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync();
             var sessionInfo = JObject.Parse(sessionResponseBody);
-            var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");            
-   
-            if (_logger != null) _logUploadSessionUrl (_logger, uploadUrl, fileName, null);
+            var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");
+
+            if (_logger != null) _logUploadSessionUrl(_logger, uploadUrl, fileName, null);
 
             // Upload in chunks using streaming (5MB chunks)
             int chunkSize = 5 * 1024 * 1024; // 5MB
@@ -435,29 +435,45 @@ namespace MailSenderLib.Services
 
                     var response = await uploadClient.SendAsync(request);
 
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var errorBody = await response.Content.ReadAsStringAsync();
+                        if (_logger != null) _logChunkFailed(_logger, (int)response.StatusCode, response.ReasonPhrase ?? "", errorBody, null);
+                        throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                    }
+
                     var responseBody = await response.Content.ReadAsStringAsync();
 
                     if (_logger != null) _logChunkStatus(_logger, end + 1, fileSize, fileName, (int)response.StatusCode, null);
 
-                    // 200/201 = complete, 202 = continue
-                    if ((int)response.StatusCode == 200 || (int)response.StatusCode == 201)
+                    // Update offset
+                    offset = end + 1;
+
+                    // Check if there are more chunks to upload by looking at nextExpectedRanges
+                    if (!string.IsNullOrWhiteSpace(responseBody))
                     {
-                        if(_logger != null) _logUploadComplete(_logger, fileName, null);                                               
-                        return;
-                    }
-                    else if ((int)response.StatusCode != 202)
-                    {
-                        if(_logger != null) _logChunkFailed(_logger, (int)response.StatusCode, response.ReasonPhrase ?? "", responseBody, null);
+                        var responseJson = JObject.Parse(responseBody);
+                        if (responseJson["nextExpectedRanges"] != null)
+                        {
+                            var nextRanges = responseJson["nextExpectedRanges"] as JArray;
+                            if (nextRanges != null && nextRanges.Count > 0)
+                            {
+                                // There are more chunks expected, continue uploading
+                                if (_logger != null) _logResponseBodyTrace(_logger, $"Next expected ranges: {string.Join(", ", nextRanges)}", null);
+                                continue;
+                            }
+                        }
                     }
 
-                    offset = end + 1;
+                    // No nextExpectedRanges means upload is complete
+                    if (_logger != null) _logUploadComplete(_logger, fileName, null);
+                    return;
                 }
             }
 
             if (_logger != null) _logUploadComplete(_logger, fileName, null);
-            
         }
-
+       
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
         {
             try
