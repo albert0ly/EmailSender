@@ -2,6 +2,8 @@ using MailSenderLib;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
 using MailSenderLib.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
@@ -32,11 +34,18 @@ namespace MailSenderLibTester
         private ListBox _lstRecvAttachments;
         private PictureBox _pbPreview;
         private Label _lblRecvStatus;
+        private readonly ILogger<GraphMailService> _logger;
 
         public MainForm()
         {
             InitializeComponent();
             LoadConfigIntoFields();
+            _logger = LoggerFactory.Create(builder =>
+            {
+                builder
+                    .AddConsole()
+                    .SetMinimumLevel(LogLevel.Debug);  
+            }).CreateLogger<GraphMailService>();
 
             // Build runtime TabControl and move existing send controls into first tab
             SetupTabs();
@@ -414,7 +423,8 @@ namespace MailSenderLibTester
                         FilePath = a
                     }).ToList();
 
-                    var mailService = new GraphMailService(optionsAuth.TenantId, optionsAuth.ClientId, optionsAuth.ClientSecret);
+
+                    var mailService = new GraphMailService(optionsAuth, _logger);
 
                     await mailService.SendMailWithLargeAttachmentsAsync(
                         fromEmail: optionsAuth.MailboxAddress,

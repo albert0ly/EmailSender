@@ -1,15 +1,15 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Azure.Core;
+using Azure.Identity;
+using MailSenderLib.Options;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Mail;
-using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,15 +18,22 @@ namespace MailSenderLib.Services
 {
     public class GraphMailService : IDisposable
     {
-        private readonly string _tenantId;
-        private readonly string _clientId;
-        private readonly string _clientSecret;
+        private readonly GraphMailOptionsAuth _optionsAuth;
+        //private readonly string _tenantId;
+        //private readonly string _clientId;
+        //private readonly string _clientSecret;
+        private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailService>? _logger;
         private readonly HttpClient _httpClient;
+        private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
+
+        // Cached token and lock for refresh
+        private AccessToken _cachedToken;
 
         // Token caching with expiration
-        private string? _accessToken;
-        private DateTimeOffset _tokenExpiration;
+        //private string? _accessToken;
+        //private DateTimeOffset _tokenExpiration;
+
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
 
@@ -67,14 +74,12 @@ namespace MailSenderLib.Services
             LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(_logResponseBodyTrace)), "{Body}");
 
         public GraphMailService(
-            string tenantId,
-            string clientId,
-            string clientSecret,
+            GraphMailOptionsAuth optionsAuth,
             ILogger<GraphMailService>? logger = null)
         {
-            _tenantId = tenantId ?? throw new ArgumentNullException(nameof(tenantId));
-            _clientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
-            _clientSecret = clientSecret ?? throw new ArgumentNullException(nameof(clientSecret));
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
             _httpClient = new HttpClient();
         }
@@ -82,63 +87,31 @@ namespace MailSenderLib.Services
         /// <summary>
         /// Get access token using client credentials flow with proper caching and expiration handling
         /// </summary>
-        private async Task<string> GetAccessTokenAsync()
+        private async Task<AccessToken> GetAccessTokenAsync(CancellationToken ct)
         {
-            // Fast path: check if cached token is still valid
-            if (!string.IsNullOrEmpty(_accessToken) &&
-                _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
+            // fast-path without locking
+            if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
             {
-#pragma warning disable CS8603 // Possible null reference return.
-                return _accessToken;
-#pragma warning restore CS8603 // Possible null reference return.
+                return _cachedToken;
             }
 
-            // Acquire lock for token refresh
-            await _tokenLock.WaitAsync();
+            await _tokenLock.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                // Double-check after acquiring lock
-                if (!string.IsNullOrEmpty(_accessToken) &&
-                    _tokenExpiration > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
+                // re-check after acquiring lock
+                if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
                 {
-#pragma warning disable CS8603 // Possible null reference return.
-                    return _accessToken;
-#pragma warning restore CS8603 // Possible null reference return.
+                    return _cachedToken;
                 }
 
                 if (_logger != null) _logRefreshingToken(_logger, null);
-
-                var tokenUrl = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
-
-                var content = new FormUrlEncodedContent(new[]
-                {
-                    new KeyValuePair<string, string>("client_id", _clientId),
-                    new KeyValuePair<string, string>("client_secret", _clientSecret),
-                    new KeyValuePair<string, string>("scope", "https://graph.microsoft.com/.default"),
-                    new KeyValuePair<string, string>("grant_type", "client_credentials")
-                });
-
-                var response = await _httpClient.PostAsync(tokenUrl, content);
-                response.EnsureSuccessStatusCode();
-
-                var responseBody = await response.Content.ReadAsStringAsync();
-                var tokenResponse = JObject.Parse(responseBody);
-
-
-                var tokenObj = tokenResponse["access_token"];
-                _accessToken = tokenObj?.ToString() ?? throw new InvalidOperationException("Access token not found in response.");
-
-
-                var expiresObj = tokenResponse["expires_in"];
-                var expiresIn = expiresObj?.Value<int>() ?? throw new InvalidOperationException("expires_in is missing in tokenResponse.");
-                _tokenExpiration = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
-               
-                if (_logger != null) _logTokenAcquired(_logger, _tokenExpiration, null);
-                return _accessToken;
+                var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
+                _cachedToken = token;
+                if (_logger != null) _logTokenAcquired(_logger, _cachedToken.ExpiresOn, null);
+                return _cachedToken;
             }
             catch (Exception ex)
             {
-
                 if (_logger != null) _logFailedToAcquireToken(_logger, ex);
                 throw;
             }
@@ -152,21 +125,23 @@ namespace MailSenderLib.Services
         /// Send email with large attachments without saving to Sent Items
         /// </summary>
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "CA2201:Do not raise reserved exception types", Justification = "<Pending>")]
-        public async Task SendMailWithLargeAttachmentsAsync(
-            string fromEmail,
+        public async Task SendMailWithLargeAttachmentsAsync(            
             List<string> toEmails,
             string subject,
             string body,
             List<EmailAttachment> attachments,
+            string? fromEmail = null,
             List<string>? ccEmails = null,
             List<string>? bccEmails = null,
-            bool isHtml = true)
+            bool isHtml = true,
+            CancellationToken ct = default)
         {
             try
             {
-                var token = await GetAccessTokenAsync();
+                var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                 _httpClient.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", token);
+                    new AuthenticationHeaderValue("Bearer", token.Token);
+                fromEmail ??= _optionsAuth.MailboxAddress;
                 if (_logger != null) _logSendingEmail(_logger, fromEmail, toEmails.Count, null);
 
                 // Step 1: Create draft message using Newtonsoft.Json serialization
@@ -209,16 +184,16 @@ namespace MailSenderLib.Services
                 });
                 var messageContent = new StringContent(messageJson, Encoding.UTF8, "application/json");
 
-                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent);
+                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent,ct).ConfigureAwait(false);
                 if (!messageResponse.IsSuccessStatusCode)
                 {
-                    var error = await GetErrorDetailsAsync(messageResponse);
+                    var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
       
                     if (_logger != null) _logFailedToCreateMessage(_logger, error, null);
                     throw new Exception($"Failed to create message: {error}");
                 }
 
-                var messageResponseBody = await messageResponse.Content.ReadAsStringAsync();
+                var messageResponseBody = await messageResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var createdMessage = JObject.Parse(messageResponseBody);
                 var messageId = createdMessage["id"]?.ToString() ?? throw new InvalidOperationException("Message ID not found in response");
 
@@ -237,22 +212,22 @@ namespace MailSenderLib.Services
                         if (fileSize > 3 * 1024 * 1024) // > 3MB
                         {
                             await UploadLargeAttachmentStreamAsync(fromEmail, messageId,
-                                attachment.FileName, attachment.FilePath, fileSize);
+                                attachment.FileName, attachment.FilePath, fileSize).ConfigureAwait(false);
                         }
                         else
                         {
                             await AddSmallAttachmentAsync(fromEmail, messageId,
-                                attachment.FileName, attachment.FilePath);
+                                attachment.FileName, attachment.FilePath).ConfigureAwait(false);
                         }
                     }
                 }
 
                 // Step 3: Get the complete message with attachments
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
-                var getResponse = await _httpClient.GetAsync(getMessageUrl);
+                var getResponse = await _httpClient.GetAsync(getMessageUrl,ct).ConfigureAwait(false);
                 getResponse.EnsureSuccessStatusCode();
 
-                var completeMessageBody = await getResponse.Content.ReadAsStringAsync();
+                var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var completeMessage = JObject.Parse(completeMessageBody);
 
                 // Remove metadata and read-only fields
@@ -269,22 +244,22 @@ namespace MailSenderLib.Services
 
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
                 var sendContent = new StringContent(sendJson, Encoding.UTF8, "application/json");
-                var sendResponse = await _httpClient.PostAsync(sendUrl, sendContent);
+                var sendResponse = await _httpClient.PostAsync(sendUrl, sendContent, ct).ConfigureAwait(false);
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
-                    var error = await GetErrorDetailsAsync(sendResponse);
+                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
                     if (_logger != null) _logFailedToSendMessage(_logger, error, null);                    
                     throw new Exception($"Failed to send message: {error}");
                 }
 
                 // Step 5: Delete the draft message
                 var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
-                var deleteResponse = await _httpClient.DeleteAsync(deleteUrl);
+                var deleteResponse = await _httpClient.DeleteAsync(deleteUrl,ct).ConfigureAwait(false);
 
                 if (!deleteResponse.IsSuccessStatusCode)
                 {
-                    var error = await GetErrorDetailsAsync(deleteResponse);
+                    var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
                     if (_logger != null) _logFailedToDeleteDraft(_logger, messageId, error, null);
                     throw new Exception($"Failed to delete draft message {messageId}, Error {error}");
                 }
@@ -373,14 +348,14 @@ namespace MailSenderLib.Services
             });
 
             var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await _httpClient.PostAsync(attachUrl, content);
+            var response = await _httpClient.PostAsync(attachUrl, content).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
             if(_logger != null) _logSmallAttachmentAdded(_logger, fileName, null);                 
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-    string fileName, string filePath, long fileSize)
+            string fileName, string filePath, long fileSize)
         {
             // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
@@ -398,10 +373,10 @@ namespace MailSenderLib.Services
             var sessionJson = JsonConvert.SerializeObject(sessionData);
             var sessionContent = new StringContent(sessionJson, Encoding.UTF8, "application/json");
 
-            var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent);
+            var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent).ConfigureAwait(false);
             sessionResponse.EnsureSuccessStatusCode();
 
-            var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync();
+            var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
             var sessionInfo = JObject.Parse(sessionResponseBody);
             var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");
 
@@ -417,7 +392,7 @@ namespace MailSenderLib.Services
             {
                 while (offset < fileSize)
                 {
-                    int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length);
+                    int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                     if (bytesRead <= 0) break;
 
                     long end = offset + bytesRead - 1;
@@ -433,16 +408,16 @@ namespace MailSenderLib.Services
                     request.Content.Headers.ContentRange =
                         new ContentRangeHeaderValue(offset, end, fileSize);
 
-                    var response = await uploadClient.SendAsync(request);
+                    var response = await uploadClient.SendAsync(request).ConfigureAwait(false);
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        var errorBody = await response.Content.ReadAsStringAsync();
+                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                         if (_logger != null) _logChunkFailed(_logger, (int)response.StatusCode, response.ReasonPhrase ?? "", errorBody, null);
                         throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
                     }
 
-                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
                     if (_logger != null) _logChunkStatus(_logger, end + 1, fileSize, fileName, (int)response.StatusCode, null);
 
@@ -478,7 +453,7 @@ namespace MailSenderLib.Services
         {
             try
             {
-                var errorBody = await response.Content.ReadAsStringAsync();
+                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 return $"Status: {response.StatusCode}, Body: {errorBody}";
             }
             catch
