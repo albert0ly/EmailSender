@@ -9,7 +9,7 @@ namespace MailSenderLib.Options
     }
 
 
-    public class  GraphMailOptions
+    public class GraphMailOptions
     {
 #pragma warning disable CA1805 // Do not initialize unnecessarily
         public bool MarkAsRead { get; set; } = false;

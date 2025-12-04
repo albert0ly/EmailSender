@@ -151,7 +151,7 @@ namespace MailSenderLib.Services
                 }
 
                 //3. Send the message 
-                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);                
+                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_optionsAuth.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
                 await EnsureSuccess(sendResp, "send message", cancellationToken).ConfigureAwait(false);
 
                 //4. Delete from Sent Items 
@@ -232,7 +232,7 @@ namespace MailSenderLib.Services
 
 
 
-        private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml, string? internetMessageId=null)
+        private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml, string? internetMessageId = null)
         {
             string Escape(string s) => s?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
 

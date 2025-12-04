@@ -1,7 +1,7 @@
+using MailSenderLib.Models;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using MailSenderLib.Models;
 
 namespace MailSenderLib.Interfaces
 {

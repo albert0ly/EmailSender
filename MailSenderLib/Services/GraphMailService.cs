@@ -44,16 +44,16 @@ namespace MailSenderLib.Services
             LoggerMessage.Define(LogLevel.Debug, new EventId(1001, nameof(_logRefreshingToken)), "Refreshing access token for GraphMailSender");
         private static readonly Action<ILogger, DateTimeOffset, Exception?> _logTokenAcquired =
             LoggerMessage.Define<DateTimeOffset>(LogLevel.Debug, new EventId(1002, nameof(_logTokenAcquired)), "Access token acquired, expires on {ExpiresOn}");
-        private static readonly Action<ILogger, string,int, Exception?> _logSendingEmail =
-                LoggerMessage.Define<string, int>(LogLevel.Debug, new EventId(1015, nameof(_logSendingEmail)), "Sending email from {From} to {ToCount} recipients");        
+        private static readonly Action<ILogger, string, int, Exception?> _logSendingEmail =
+                LoggerMessage.Define<string, int>(LogLevel.Debug, new EventId(1015, nameof(_logSendingEmail)), "Sending email from {From} to {ToCount} recipients");
         private static readonly Action<ILogger, string, Exception?> _logFailedToCreateMessage =
           LoggerMessage.Define<string>(LogLevel.Error, new EventId(1016, nameof(_logFailedToCreateMessage)), "Failed to create message: {Error}");
-        private static readonly Action<ILogger, string,  Exception?> _logDraftCreated =
+        private static readonly Action<ILogger, string, Exception?> _logDraftCreated =
           LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1017, nameof(_logDraftCreated)), "Draft created {MessageId}");
         private static readonly Action<ILogger, string, long, Exception?> _logAttachingFile =
-          LoggerMessage.Define<string, long>(LogLevel.Debug, new EventId(1018, nameof(_logAttachingFile)), "Attaching file {FileName} size {FileSize} recipients");        
+          LoggerMessage.Define<string, long>(LogLevel.Debug, new EventId(1018, nameof(_logAttachingFile)), "Attaching file {FileName} size {FileSize} recipients");
         private static readonly Action<ILogger, string, Exception?> _logFailedToSendMessage =
-          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1019, nameof(_logFailedToSendMessage)), "Failed to send message: {Error}");        
+          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1019, nameof(_logFailedToSendMessage)), "Failed to send message: {Error}");
         private static readonly Action<ILogger, string, string, Exception?> _logFailedToDeleteDraft =
           LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1020, nameof(_logFailedToDeleteDraft)), "Failed to delete draft message {MessageId}, Error {Error}");
         private static readonly Action<ILogger, string, Exception?> _logMessageSent =
@@ -125,7 +125,7 @@ namespace MailSenderLib.Services
         /// Send email with large attachments without saving to Sent Items
         /// </summary>
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "CA2201:Do not raise reserved exception types", Justification = "<Pending>")]
-        public async Task SendMailWithLargeAttachmentsAsync(            
+        public async Task SendMailWithLargeAttachmentsAsync(
             List<string> toEmails,
             string subject,
             string body,
@@ -184,11 +184,11 @@ namespace MailSenderLib.Services
                 });
                 var messageContent = new StringContent(messageJson, Encoding.UTF8, "application/json");
 
-                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent,ct).ConfigureAwait(false);
+                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent, ct).ConfigureAwait(false);
                 if (!messageResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
-      
+
                     if (_logger != null) _logFailedToCreateMessage(_logger, error, null);
                     throw new Exception($"Failed to create message: {error}");
                 }
@@ -197,7 +197,7 @@ namespace MailSenderLib.Services
                 var createdMessage = JObject.Parse(messageResponseBody);
                 var messageId = createdMessage["id"]?.ToString() ?? throw new InvalidOperationException("Message ID not found in response");
 
-                if (_logger != null) _logDraftCreated(_logger, messageId, null);              
+                if (_logger != null) _logDraftCreated(_logger, messageId, null);
 
                 // Step 2: Attach files (stream large files, direct upload small files)
                 if (attachments != null && attachments.Count > 0)
@@ -224,7 +224,7 @@ namespace MailSenderLib.Services
 
                 // Step 3: Get the complete message with attachments
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
-                var getResponse = await _httpClient.GetAsync(getMessageUrl,ct).ConfigureAwait(false);
+                var getResponse = await _httpClient.GetAsync(getMessageUrl, ct).ConfigureAwait(false);
                 getResponse.EnsureSuccessStatusCode();
 
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -249,13 +249,13 @@ namespace MailSenderLib.Services
                 if (!sendResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                    if (_logger != null) _logFailedToSendMessage(_logger, error, null);                    
+                    if (_logger != null) _logFailedToSendMessage(_logger, error, null);
                     throw new Exception($"Failed to send message: {error}");
                 }
 
                 // Step 5: Delete the draft message
                 var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
-                var deleteResponse = await _httpClient.DeleteAsync(deleteUrl,ct).ConfigureAwait(false);
+                var deleteResponse = await _httpClient.DeleteAsync(deleteUrl, ct).ConfigureAwait(false);
 
                 if (!deleteResponse.IsSuccessStatusCode)
                 {
@@ -264,7 +264,7 @@ namespace MailSenderLib.Services
                     throw new Exception($"Failed to delete draft message {messageId}, Error {error}");
                 }
 
-                if (_logger != null) _logMessageSent(_logger, messageId, null);                
+                if (_logger != null) _logMessageSent(_logger, messageId, null);
             }
             catch (Exception ex)
             {
@@ -351,7 +351,7 @@ namespace MailSenderLib.Services
             var response = await _httpClient.PostAsync(attachUrl, content).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
-            if(_logger != null) _logSmallAttachmentAdded(_logger, fileName, null);                 
+            if (_logger != null) _logSmallAttachmentAdded(_logger, fileName, null);
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
@@ -444,7 +444,7 @@ namespace MailSenderLib.Services
 
             if (_logger != null) _logUploadComplete(_logger, fileName, null);
         }
-       
+
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
         {
             try
@@ -495,7 +495,7 @@ namespace MailSenderLib.Services
 
     internal class RecipientPayload
     {
-        public EmailAddressPayload? EmailAddress { get; set; }       
+        public EmailAddressPayload? EmailAddress { get; set; }
     }
 
     internal class EmailAddressPayload
