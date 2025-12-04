@@ -428,15 +428,11 @@ namespace MailSenderLib.Services
                     if (!string.IsNullOrWhiteSpace(responseBody))
                     {
                         var responseJson = JObject.Parse(responseBody);
-                        if (responseJson["nextExpectedRanges"] != null)
+                        if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
                         {
-                            var nextRanges = responseJson["nextExpectedRanges"] as JArray;
-                            if (nextRanges != null && nextRanges.Count > 0)
-                            {
-                                // There are more chunks expected, continue uploading
-                                if (_logger != null) _logResponseBodyTrace(_logger, $"Next expected ranges: {string.Join(", ", nextRanges)}", null);
-                                continue;
-                            }
+                            // There are more chunks expected, continue uploading
+                            if (_logger != null) _logResponseBodyTrace(_logger, $"Next expected ranges: {string.Join(", ", nextRanges)}", null);
+                            continue;
                         }
                     }
 
@@ -486,7 +482,7 @@ namespace MailSenderLib.Services
     {
         public string? Subject { get; set; }
         public BodyPayload? Body { get; set; }
-        public List<RecipientPayload> ToRecipients { get; set; }
+        public List<RecipientPayload>? ToRecipients { get; set; }
         public List<RecipientPayload>? CcRecipients { get; set; }
         public List<RecipientPayload>? BccRecipients { get; set; }
     }
