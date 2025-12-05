@@ -4,6 +4,8 @@ using MailSenderLib.Options;
 using MailSenderLib.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Serilog;
+using Serilog.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
@@ -40,12 +42,23 @@ namespace MailSenderLibTester
         {
             InitializeComponent();
             LoadConfigIntoFields();
-            _logger = LoggerFactory.Create(builder =>
+
+            Log.Logger = new LoggerConfiguration()
+                .MinimumLevel.Debug()
+                .WriteTo.Console()
+                .WriteTo.File(
+                    path: "logs/app-.log",          // note the "-" for rolling
+                    rollingInterval: RollingInterval.Day,
+                    retainedFileCountLimit: 7,      // keep last 7 days
+                    shared: true
+                ).CreateLogger();
+
+            var loggerFactory = LoggerFactory.Create(builder =>
             {
-                builder
-                    .AddConsole()
-                    .SetMinimumLevel(LogLevel.Debug);  
-            }).CreateLogger<GraphMailSender>();
+                builder.AddSerilog();   // register Serilog provider
+            });
+
+            _logger = loggerFactory.CreateLogger<GraphMailSender>();            
 
             // Build runtime TabControl and move existing send controls into first tab
             SetupTabs();
@@ -365,13 +378,13 @@ namespace MailSenderLibTester
 
                     var mailService = new GraphMailSender(optionsAuth, _logger);
 
-                  
+
                     await mailService.SendEmailAsync(
                         toRecipients: to,
                         ccRecipients: cc,
                         bccRecipients: bcc,
                         subject: subject,
-                        body: body,                                                
+                        body: body,
                         isHtml: isHtml,
                         attachments: attachments1,
                         fromEmail: optionsAuth.MailboxAddress
