@@ -34,7 +34,7 @@ namespace MailSenderLibTester
         private ListBox _lstRecvAttachments;
         private PictureBox _pbPreview;
         private Label _lblRecvStatus;
-        private readonly ILogger<GraphMailService> _logger;
+        private readonly ILogger<GraphMailSender> _logger;
 
         public MainForm()
         {
@@ -45,7 +45,7 @@ namespace MailSenderLibTester
                 builder
                     .AddConsole()
                     .SetMinimumLevel(LogLevel.Debug);  
-            }).CreateLogger<GraphMailService>();
+            }).CreateLogger<GraphMailSender>();
 
             // Build runtime TabControl and move existing send controls into first tab
             SetupTabs();
@@ -246,67 +246,6 @@ namespace MailSenderLibTester
             }
         }
 
-        private async void btnSend_Click(object sender, EventArgs e)
-        {
-            btnSend.Enabled = false;
-            lblStatus.Text = "Sending...";
-            try
-            {
-                var optionsAuth = new GraphMailOptionsAuth
-                {
-                    TenantId = txtTenant.Text.Trim(),
-                    ClientId = txtClientId.Text.Trim(),
-                    ClientSecret = txtClientSecret.Text.Trim(),
-                    MailboxAddress = txtMailbox.Text.Trim()
-                };
-
-                var options = new GraphMailOptions
-                {
-                    MoveToSentFolder = checkSaveInSent.Checked,
-                    MarkAsRead = false  
-                };
-
-                var senderLib = new GraphMailSender(optionsAuth, options);
-
-                var to = SplitEmails(txtTo.Text);
-                var cc = SplitEmails(txtCc.Text);
-                var bcc = SplitEmails(txtBcc.Text);
-                var subject = txtSubject.Text;
-                var body = txtBody.Text;
-                var isHtml = chkIsHtml.Checked;
-
-                var streams = new List<Stream>();
-                try
-                {
-                    var atts = _attachmentPaths.Select(p =>
-                    {
-                        var s = (Stream)File.OpenRead(p);
-                        streams.Add(s);
-                        return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
-                    }).ToList();
-
-                    await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
-
-                }
-                finally
-                {
-                    foreach (var s in streams)
-                    {
-                        try { s.Dispose(); } catch { }
-                    }
-                }
-                lblStatus.Text = "Sent";
-            }
-            catch (Exception ex)
-            {
-                lblStatus.Text = ex.Message;
-            }
-            finally
-            {
-                btnSend.Enabled = true;
-            }
-        }
-
         private void LoadConfigIntoFields()
         {
             try
@@ -424,16 +363,18 @@ namespace MailSenderLibTester
                     }).ToList();
 
 
-                    var mailService = new GraphMailService(optionsAuth, _logger);
+                    var mailService = new GraphMailSender(optionsAuth, _logger);
 
-                    await mailService.SendMailWithLargeAttachmentsAsync(
-                        fromEmail: optionsAuth.MailboxAddress,
-                        toEmails: to,
+                  
+                    await mailService.SendEmailAsync(
+                        toRecipients: to,
+                        ccRecipients: cc,
+                        bccRecipients: bcc,
                         subject: subject,
-                        body: body,
+                        body: body,                                                
+                        isHtml: isHtml,
                         attachments: attachments1,
-                        ccEmails: cc,
-                        isHtml: isHtml
+                        fromEmail: optionsAuth.MailboxAddress
                     );
                 }
                 finally

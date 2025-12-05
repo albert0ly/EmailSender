@@ -39,7 +39,6 @@ namespace MailSenderLibTester
             this.lblAttachments = new System.Windows.Forms.Label();
             this.btnAddAttachment = new System.Windows.Forms.Button();
             this.lstAttachments = new System.Windows.Forms.ListBox();
-            this.btnSend = new System.Windows.Forms.Button();
             this.lblStatus = new System.Windows.Forms.Label();
             this.checkSaveInSent = new System.Windows.Forms.CheckBox();
             this.btnSend2 = new System.Windows.Forms.Button();
@@ -232,16 +231,6 @@ namespace MailSenderLibTester
             this.lstAttachments.Size = new System.Drawing.Size(414, 82);
             this.lstAttachments.TabIndex = 21;
             // 
-            // btnSend
-            // 
-            this.btnSend.Location = new System.Drawing.Point(15, 509);
-            this.btnSend.Name = "btnSend";
-            this.btnSend.Size = new System.Drawing.Size(120, 23);
-            this.btnSend.TabIndex = 22;
-            this.btnSend.Text = "Send 1";
-            this.btnSend.UseVisualStyleBackColor = true;
-            this.btnSend.Click += new System.EventHandler(this.btnSend_Click);
-            // 
             // lblStatus
             // 
             this.lblStatus.AutoSize = true;
@@ -279,7 +268,6 @@ namespace MailSenderLibTester
             this.Controls.Add(this.btnSend2);
             this.Controls.Add(this.checkSaveInSent);
             this.Controls.Add(this.lblStatus);
-            this.Controls.Add(this.btnSend);
             this.Controls.Add(this.lstAttachments);
             this.Controls.Add(this.btnAddAttachment);
             this.Controls.Add(this.lblAttachments);
@@ -333,7 +321,6 @@ namespace MailSenderLibTester
         private System.Windows.Forms.Label lblAttachments;
         private System.Windows.Forms.Button btnAddAttachment;
         private System.Windows.Forms.ListBox lstAttachments;
-        private System.Windows.Forms.Button btnSend;
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.CheckBox checkSaveInSent;
         private System.Windows.Forms.Button btnSend2;
