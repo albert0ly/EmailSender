@@ -2,6 +2,7 @@
 using Azure.Identity;
 using MailSenderLib.Exceptions;
 using MailSenderLib.Options;
+using MailSenderLib.Logging;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -31,40 +32,6 @@ namespace MailSenderLib.Services
 
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
-
-        // LoggerMessage delegates (avoid allocation-heavy LoggerExtensions calls)
-        private static readonly Action<ILogger, Exception?> _logFailedToAcquireToken =
-            LoggerMessage.Define(LogLevel.Error, new EventId(1000, nameof(_logFailedToAcquireToken)), "Failed to acquire access token for GraphMailSender");
-        private static readonly Action<ILogger, Exception?> _logRefreshingToken =
-            LoggerMessage.Define(LogLevel.Debug, new EventId(1001, nameof(_logRefreshingToken)), "Refreshing access token for GraphMailSender");
-        private static readonly Action<ILogger, DateTimeOffset, Exception?> _logTokenAcquired =
-            LoggerMessage.Define<DateTimeOffset>(LogLevel.Debug, new EventId(1002, nameof(_logTokenAcquired)), "Access token acquired, expires on {ExpiresOn}");
-        private static readonly Action<ILogger, string, int, Exception?> _logSendingEmail =
-                LoggerMessage.Define<string, int>(LogLevel.Debug, new EventId(1015, nameof(_logSendingEmail)), "Sending email from {From} to {ToCount} recipients");
-        private static readonly Action<ILogger, string, Exception?> _logFailedToCreateMessage =
-          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1016, nameof(_logFailedToCreateMessage)), "Failed to create message: {Error}");
-        private static readonly Action<ILogger, string, Exception?> _logDraftCreated =
-          LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1017, nameof(_logDraftCreated)), "Draft created {MessageId}");
-        private static readonly Action<ILogger, string, long, Exception?> _logAttachingFile =
-          LoggerMessage.Define<string, long>(LogLevel.Debug, new EventId(1018, nameof(_logAttachingFile)), "Attaching file {FileName} size {FileSize} recipients");
-        private static readonly Action<ILogger, string, Exception?> _logFailedToSendMessage =
-          LoggerMessage.Define<string>(LogLevel.Error, new EventId(1019, nameof(_logFailedToSendMessage)), "Failed to send message: {Error}");
-        private static readonly Action<ILogger, string, string, Exception?> _logFailedToDeleteDraft =
-          LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1020, nameof(_logFailedToDeleteDraft)), "Failed to delete draft message {MessageId}, Error {Error}");
-        private static readonly Action<ILogger, string, Exception?> _logMessageSent =
-          LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1021, nameof(_logMessageSent)), "Message sent successfully without saving to Sent Items {MessageId}");
-        private static readonly Action<ILogger, string, string, Exception?> _logUploadSessionUrl =
-            LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(1013, nameof(_logUploadSessionUrl)), "Upload session URL: {Url} for file: {FileName}");
-        private static readonly Action<ILogger, long, long, string, int, Exception?> _logChunkStatus =
-            LoggerMessage.Define<long, long, string, int>(LogLevel.Debug, new EventId(1010, nameof(_logChunkStatus)), "Uploaded {Current}/{Total} bytes of {FileName}, Status {Status}");
-        private static readonly Action<ILogger, string, Exception?> _logSmallAttachmentAdded =
-            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1022, nameof(_logSmallAttachmentAdded)), "Small attachment added: {FileName}");
-        private static readonly Action<ILogger, string, Exception?> _logUploadComplete =
-            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1012, nameof(_logUploadComplete)), "Upload complete for {FileName}");
-        private static readonly Action<ILogger, int, string, string, Exception?> _logChunkFailed =
-            LoggerMessage.Define<int, string, string>(LogLevel.Error, new EventId(1014, nameof(_logChunkFailed)), "Chunk upload failed {Status} {Reason} - {Body}");
-        private static readonly Action<ILogger, string, Exception?> _logResponseBodyTrace =
-            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(_logResponseBodyTrace)), "{Body}");
 
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
@@ -96,15 +63,16 @@ namespace MailSenderLib.Services
                     return _cachedToken;
                 }
 
-                if (_logger != null) _logRefreshingToken(_logger, null);
+                _logger?.LogRefreshingToken();
+                
                 var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
-                _cachedToken = token;
-                if (_logger != null) _logTokenAcquired(_logger, _cachedToken.ExpiresOn, null);
+                _cachedToken = token;                
+                _logger?.LogTokenAcquired(_cachedToken.ExpiresOn);
                 return _cachedToken;
             }
             catch (Exception ex)
-            {
-                if (_logger != null) _logFailedToAcquireToken(_logger, ex);
+            {                
+                _logger?.LogFailedToAcquireToken(ex);
                 throw;
             }
             finally
@@ -141,8 +109,7 @@ namespace MailSenderLib.Services
 
                 fromEmail ??= _optionsAuth.MailboxAddress;
 
-                if (_logger != null)
-                    _logSendingEmail(_logger, fromEmail, toRecipients.Count, null);
+                _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
 
                 // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
@@ -189,8 +156,7 @@ namespace MailSenderLib.Services
                 if (!messageResponse.IsSuccessStatusCode)
                 {
                     var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
-                    if (_logger != null)
-                        _logFailedToCreateMessage(_logger, error, null);
+                    _logger?.LogFailedToCreateMessage(error);
                     throw new GraphMailFailedCreateMessageException($"Failed to create message: {error}");
                 }
 
@@ -199,9 +165,7 @@ namespace MailSenderLib.Services
                 messageId = createdMessage["id"]?.ToString()
                     ?? throw new GraphMailFailedCreateMessageException($"Message ID not found in response: {messageResponseBody}");
 
-                if (_logger != null)
-                    _logDraftCreated(_logger, messageId, null);
-
+                _logger?.LogDraftCreated(messageId);
                 draftCreated = true;
 
                 // Step 2: Attach files (stream large files, direct upload small files)
@@ -212,9 +176,7 @@ namespace MailSenderLib.Services
                         var fileInfo = new FileInfo(attachment.FilePath);
                         var fileSize = fileInfo.Length;
 
-                        if (_logger != null)
-                            _logAttachingFile(_logger, attachment.FileName, fileSize, null);
-
+                        _logger?.LogAttachingFile(attachment.FileName, fileSize);
                         if (fileSize > 3 * 1024 * 1024) // > 3MB
                         {
                             await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize,ct).ConfigureAwait(false);
@@ -253,20 +215,18 @@ namespace MailSenderLib.Services
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
-                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                    if (_logger != null)
-                        _logFailedToSendMessage(_logger, error, null);
+                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);         
+                    _logger?.LogFailedToSendMessage(error);
                     throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
                 }
 
-                if (_logger != null)
-                    _logMessageSent(_logger, messageId, null);
+                _logger?.LogMessageSent(messageId);
             }
             catch (Exception ex)
             {
                 originalException = ex;
-                if (_logger != null)
-                    _logFailedToSendMessage(_logger, "", ex);
+                _logger?.LogFailedToSendMessage("", ex);
+
                 // Don't throw yet - we'll handle it in finally after cleanup attempt
             }
             finally
@@ -282,8 +242,7 @@ namespace MailSenderLib.Services
                         if (!deleteResponse.IsSuccessStatusCode)
                         {
                             var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
-                            if (_logger != null)
-                                _logFailedToDeleteDraft(_logger, messageId, error, null);
+                            _logger?.LogFailedToDeleteDraft(messageId, error);
 
                             var cleanupEx = new GraphMailFailedDeleteDraftMessageException($"Failed to delete draft message {messageId}, Error {error}");
 
@@ -405,8 +364,8 @@ namespace MailSenderLib.Services
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync(attachUrl, content, ct).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
-
-            if (_logger != null) _logSmallAttachmentAdded(_logger, fileName, null);
+            
+            _logger?.LogSmallAttachmentAdded(fileName);
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
@@ -431,8 +390,8 @@ namespace MailSenderLib.Services
             var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent, ct).ConfigureAwait(false);
             if (!sessionResponse.IsSuccessStatusCode)
             {
-                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                if (_logger != null) _logChunkFailed(_logger, (int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody, null);
+                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);                
+                _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);    
                 throw new InvalidOperationException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
             }
 
@@ -440,7 +399,7 @@ namespace MailSenderLib.Services
             var sessionInfo = JObject.Parse(sessionResponseBody);
             var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");
 
-            if (_logger != null) _logUploadSessionUrl(_logger, uploadUrl, fileName, null);
+            _logger?.LogUploadSessionUrl(uploadUrl, fileName);
 
             // Upload in chunks using streaming (5MB chunks)
             int chunkSize = 5 * 1024 * 1024; // 5MB
@@ -470,17 +429,16 @@ namespace MailSenderLib.Services
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                        if (_logger != null) _logChunkFailed(_logger, (int)response.StatusCode, response.ReasonPhrase ?? "", errorBody, null);
+                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);                        
+                        _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
                         throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
                     }
 
                     var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-                    if (_logger != null) _logChunkStatus(_logger, end + 1, fileSize, fileName, (int)response.StatusCode, null);
-
                     // Update offset
                     offset = end + 1;
+                    _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
 
                     // Check if there are more chunks to upload by looking at nextExpectedRanges
                     if (!string.IsNullOrWhiteSpace(responseBody))
@@ -488,19 +446,19 @@ namespace MailSenderLib.Services
                         var responseJson = JObject.Parse(responseBody);
                         if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
                         {
-                            // There are more chunks expected, continue uploading
-                            if (_logger != null) _logResponseBodyTrace(_logger, $"Next expected ranges: {string.Join(", ", nextRanges)}", null);
+                            // There are more chunks expected, continue uploading                            
+                            _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
                             continue;
                         }
                     }
 
-                    // No nextExpectedRanges means upload is complete
-                    if (_logger != null) _logUploadComplete(_logger, fileName, null);
+                    // No nextExpectedRanges means upload is complete                    
+                    _logger?.LogUploadComplete(fileName);   
                     return;
                 }
             }
-
-            if (_logger != null) _logUploadComplete(_logger, fileName, null);
+            
+            _logger?.LogUploadComplete(fileName);
         }
 
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
