@@ -239,7 +239,16 @@ namespace MailSenderLib.Services
                 {
                     foreach (var attachment in attachments)
                     {
+                        if (!File.Exists(attachment.FilePath))
+                        {
+                            throw new FileNotFoundException($"Attachment file not found: {attachment.FilePath}", attachment.FilePath);
+                        }
+
                         var fileInfo = new FileInfo(attachment.FilePath);
+                        if (fileInfo.Length == 0)
+                        {
+                            throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
+                        }
                         var fileSize = fileInfo.Length;
 
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
