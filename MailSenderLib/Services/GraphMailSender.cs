@@ -1,15 +1,16 @@
 ﻿using Azure.Core;
 using Azure.Identity;
 using MailSenderLib.Exceptions;
-using MailSenderLib.Options;
+using MailSenderLib.Interfaces;
 using MailSenderLib.Logging;
 using MailSenderLib.Models;
-using MailSenderLib.Interfaces;
+using MailSenderLib.Options;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
@@ -476,64 +477,72 @@ namespace MailSenderLib.Services
 
             _logger?.LogUploadSessionUrl(uploadUrl, fileName);
 
-            // Upload in chunks using streaming (5MB chunks)
-            int chunkSize = ChunkSize; // 5MB
-            byte[] buffer = new byte[chunkSize];
+            // Upload in chunks using streaming (5MB chunks)                    
+            var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
             long offset = 0;
-
-            using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+            
+            try 
             {
-                while (offset < fileSize)
+                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
                 {
-                    int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
-                    if (bytesRead <= 0) break;
-
-                    long end = offset + bytesRead - 1;
-
-                    var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+                    while (offset < fileSize)
                     {
-                        Content = new ByteArrayContent(buffer, 0, bytesRead)
-                    };
+                        int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+                        if (bytesRead <= 0) break;
 
-                    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-                    request.Content.Headers.ContentLength = bytesRead;
-                    request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+                        long end = offset + bytesRead - 1;
 
-                    // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
-                    var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                        _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
-                        throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
-                    }
-
-                    var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-                    // Update offset
-                    offset = end + 1;
-                    _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
-
-                    // Check if there are more chunks to upload by looking at nextExpectedRanges
-                    if (!string.IsNullOrWhiteSpace(responseBody))
-                    {
-                        var responseJson = JObject.Parse(responseBody);
-                        if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
+                        var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
                         {
-                            // There are more chunks expected, continue uploading                            
-                            _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
-                            continue;
-                        }
-                    }
+                            Content = new ByteArrayContent(buffer, 0, bytesRead)
+                        };
 
-                    // No nextExpectedRanges means upload is complete                    
-                    _logger?.LogUploadComplete(fileName);
-                    return;
+                        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                        request.Content.Headers.ContentLength = bytesRead;
+                        request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+
+                        // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
+                        var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
+                            throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                        }
+
+                        var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                        // Update offset
+                        offset = end + 1;
+                        _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
+
+                        // Check if there are more chunks to upload by looking at nextExpectedRanges
+                        if (!string.IsNullOrWhiteSpace(responseBody))
+                        {
+                            var responseJson = JObject.Parse(responseBody);
+                            if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
+                            {
+                                // There are more chunks expected, continue uploading                            
+                                _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
+                                continue;
+                            }
+                        }
+
+                        // No nextExpectedRanges means upload is complete                    
+                        _logger?.LogUploadComplete(fileName);
+                        return;
+                    }
                 }
+
+                _logger?.LogUploadComplete(fileName);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
 
-            _logger?.LogUploadComplete(fileName);
+
         }
 
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
