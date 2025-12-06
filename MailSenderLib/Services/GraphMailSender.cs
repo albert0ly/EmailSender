@@ -40,42 +40,68 @@ namespace MailSenderLib.Services
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
 
         /// <summary>
-        /// Initializes a new instance of the GraphMailSender class.
+        /// Initializes a new instance of the GraphMailSender class using IHttpClientFactory (recommended).
         /// </summary>
         /// <param name="optionsAuth">Graph authentication options (required).</param>
-        /// <param name="httpClientFactory">IHttpClientFactory for creating HttpClient instances (recommended).</param>
-        /// <param name="httpClient">Direct HttpClient instance (fallback, not recommended for production).</param>
+        /// <param name="httpClientFactory">IHttpClientFactory for creating HttpClient instances.</param>
         /// <param name="logger">Optional logger instance.</param>
         /// <remarks>
-        /// Priority order: httpClientFactory > httpClient > new HttpClient().
         /// Using IHttpClientFactory is recommended to avoid socket exhaustion issues.
+        /// The factory manages the HttpClient lifecycle automatically.
         /// </remarks>
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
-            IHttpClientFactory? httpClientFactory = null,
-            HttpClient? httpClient = null,
+            IHttpClientFactory httpClientFactory,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
+            _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient(HttpClientName);
+            _ownsHttpClient = false; // Never own HttpClient from factory
+        }
 
-            // Priority: IHttpClientFactory > HttpClient > new HttpClient()
-            if (httpClientFactory != null)
-            {
-                _httpClient = httpClientFactory.CreateClient(HttpClientName);
-                _ownsHttpClient = false; // Never own HttpClient from factory
-            }
-            else if (httpClient != null)
-            {
-                _httpClient = httpClient;
-                _ownsHttpClient = false; // Don't own injected HttpClient
-            }
-            else
-            {
-                _httpClient = new HttpClient();
-                _ownsHttpClient = true; // We own this one
-            }
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class using a direct HttpClient instance.
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="httpClient">HttpClient instance to use.</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// Note: The provided HttpClient will not be disposed by this class.
+        /// For production use, prefer the constructor with IHttpClientFactory.
+        /// </remarks>
+        public GraphMailSender(
+            GraphMailOptionsAuth optionsAuth,
+            HttpClient httpClient,
+            ILogger<GraphMailSender>? logger = null)
+        {
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
+            _logger = logger;
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _ownsHttpClient = false; // Don't own injected HttpClient
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class.
+        /// Creates a new HttpClient instance internally (not recommended for production).
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// This constructor creates a new HttpClient instance which can lead to socket exhaustion.
+        /// For production use, prefer the constructor with IHttpClientFactory.
+        /// </remarks>
+        public GraphMailSender(
+            GraphMailOptionsAuth optionsAuth,
+            ILogger<GraphMailSender>? logger = null)
+        {
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
+            _logger = logger;
+            _httpClient = new HttpClient();
+            _ownsHttpClient = true; // We own this one
         }
 
         /// <summary>

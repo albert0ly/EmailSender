@@ -376,7 +376,7 @@ namespace MailSenderLibTester
                     }).ToList();
 
 
-                    var mailService = new GraphMailSender(optionsAuth, null, null, _logger);
+                    var mailService = new GraphMailSender(optionsAuth, _logger);
 
 
                     await mailService.SendEmailAsync(
