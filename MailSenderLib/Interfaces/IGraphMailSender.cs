@@ -1,5 +1,5 @@
+﻿using MailSenderLib.Models;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -7,14 +7,15 @@ namespace MailSenderLib.Interfaces
 {
     public interface IGraphMailSender
     {
-        Task SendEmailAsync(
-            IEnumerable<string> toRecipients,
-            IEnumerable<string>? ccRecipients,
-            IEnumerable<string>? bccRecipients,
-            string subject,
-            string body,
-            bool isHtml,
-            IEnumerable<(string FileName, string ContentType, Stream ContentStream)>? attachments,
-            CancellationToken cancellationToken = default);
+        void Dispose();
+        Task SendEmailAsync(List<string> toRecipients,
+                            List<string>? ccRecipients,
+                            List<string>? bccRecipients,
+                            string subject,
+                            string body,
+                            bool isHtml=true,
+                            List<EmailAttachment>? attachments=null,
+                            string? fromEmail = null,
+                            CancellationToken ct = default);
     }
 }

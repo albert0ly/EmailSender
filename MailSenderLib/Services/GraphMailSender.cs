@@ -4,6 +4,7 @@ using MailSenderLib.Exceptions;
 using MailSenderLib.Options;
 using MailSenderLib.Logging;
 using MailSenderLib.Models;
+using MailSenderLib.Interfaces;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -19,9 +20,10 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+
 namespace MailSenderLib.Services
 {
-    public class GraphMailSender : IDisposable
+    public class GraphMailSender : IDisposable, IGraphMailSender
     {
         private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
         private const int ChunkSize = 5 * 1024 * 1024; // 5MB
@@ -104,7 +106,7 @@ namespace MailSenderLib.Services
             _ownsHttpClient = true; // We own this one
         }
 
-        /// <summary>
+        /// <summary> 
         /// Get access token using client credentials flow with proper caching and expiration handling
         /// </summary>
         private async Task<AccessToken> GetAccessTokenAsync(CancellationToken ct)
@@ -125,14 +127,14 @@ namespace MailSenderLib.Services
                 }
 
                 _logger?.LogRefreshingToken();
-                
+
                 var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
-                _cachedToken = token;                
+                _cachedToken = token;
                 _logger?.LogTokenAcquired(_cachedToken.ExpiresOn);
                 return _cachedToken;
             }
             catch (Exception ex)
-            {                
+            {
                 _logger?.LogFailedToAcquireToken(ex);
                 throw;
             }
@@ -153,8 +155,8 @@ namespace MailSenderLib.Services
             List<string>? bccRecipients,
             string subject,
             string body,
-            bool isHtml,
-            List<EmailAttachment>? attachments,
+            bool isHtml=true,
+            List<EmailAttachment>? attachments=null,
             string? fromEmail = null,
             CancellationToken ct = default)
         {
@@ -243,7 +245,7 @@ namespace MailSenderLib.Services
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
                         {
-                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize,ct).ConfigureAwait(false);
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, ct).ConfigureAwait(false);
                         }
                         else
                         {
@@ -279,7 +281,7 @@ namespace MailSenderLib.Services
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
-                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);         
+                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
                     _logger?.LogFailedToSendMessage(error);
                     throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
                 }
@@ -428,7 +430,7 @@ namespace MailSenderLib.Services
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync(attachUrl, content, ct).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
-            
+
             _logger?.LogSmallAttachmentAdded(fileName);
         }
 
@@ -454,8 +456,8 @@ namespace MailSenderLib.Services
             var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent, ct).ConfigureAwait(false);
             if (!sessionResponse.IsSuccessStatusCode)
             {
-                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);                
-                _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);    
+                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);
                 throw new InvalidOperationException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
             }
 
@@ -493,7 +495,7 @@ namespace MailSenderLib.Services
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);                        
+                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                         _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
                         throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
                     }
@@ -517,11 +519,11 @@ namespace MailSenderLib.Services
                     }
 
                     // No nextExpectedRanges means upload is complete                    
-                    _logger?.LogUploadComplete(fileName);   
+                    _logger?.LogUploadComplete(fileName);
                     return;
                 }
             }
-            
+
             _logger?.LogUploadComplete(fileName);
         }
 
