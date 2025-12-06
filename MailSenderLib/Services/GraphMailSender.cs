@@ -25,6 +25,7 @@ namespace MailSenderLib.Services
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
         private readonly HttpClient _httpClient;
+        private readonly bool _ownsHttpClient;
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
 
         // Cached token and lock for refresh
@@ -35,12 +36,14 @@ namespace MailSenderLib.Services
 
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
+            HttpClient? httpClient = null,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
-            _httpClient = new HttpClient();
+            _ownsHttpClient = httpClient == null;
+            _httpClient = httpClient ?? new HttpClient();
         }
 
         /// <summary>
@@ -407,7 +410,6 @@ namespace MailSenderLib.Services
             long offset = 0;
 
             using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
-            using (var uploadClient = new HttpClient())
             {
                 while (offset < fileSize)
                 {
@@ -425,7 +427,8 @@ namespace MailSenderLib.Services
                     request.Content.Headers.ContentLength = bytesRead;
                     request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
 
-                    var response = await uploadClient.SendAsync(request,ct).ConfigureAwait(false);
+                    // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
+                    var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
 
                     if (!response.IsSuccessStatusCode)
                     {
@@ -477,7 +480,11 @@ namespace MailSenderLib.Services
         public void Dispose()
         {
             _tokenLock?.Dispose();
-            _httpClient?.Dispose();
+            // Only dispose HttpClient if we own it (created it, not injected)
+            if (_ownsHttpClient)
+            {
+                _httpClient?.Dispose();
+            }
             (_credential as IDisposable)?.Dispose();
             GC.SuppressFinalize(this);
         }
