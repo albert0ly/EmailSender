@@ -21,6 +21,8 @@ namespace MailSenderLib.Services
 {
     public class GraphMailSender : IDisposable
     {
+        private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
+        private const int ChunkSize = 5 * 1024 * 1024; // 5MB
         private readonly GraphMailOptionsAuth _optionsAuth;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
@@ -180,7 +182,7 @@ namespace MailSenderLib.Services
                         var fileSize = fileInfo.Length;
 
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
-                        if (fileSize > 3 * 1024 * 1024) // > 3MB
+                        if (fileSize > LargeAttachmentThreshold) // > 3MB
                         {
                             await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize,ct).ConfigureAwait(false);
                         }
@@ -405,7 +407,7 @@ namespace MailSenderLib.Services
             _logger?.LogUploadSessionUrl(uploadUrl, fileName);
 
             // Upload in chunks using streaming (5MB chunks)
-            int chunkSize = 5 * 1024 * 1024; // 5MB
+            int chunkSize = ChunkSize; // 5MB
             byte[] buffer = new byte[chunkSize];
             long offset = 0;
 
