@@ -3,6 +3,8 @@ using Azure.Identity;
 using MailSenderLib.Exceptions;
 using MailSenderLib.Options;
 using MailSenderLib.Logging;
+using MailSenderLib.Models;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -29,6 +31,7 @@ namespace MailSenderLib.Services
         private readonly HttpClient _httpClient;
         private readonly bool _ownsHttpClient;
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
+        private const string HttpClientName = "GraphMailSender";
 
         // Cached token and lock for refresh
         private AccessToken _cachedToken;
@@ -36,16 +39,43 @@ namespace MailSenderLib.Services
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
         private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
 
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class.
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="httpClientFactory">IHttpClientFactory for creating HttpClient instances (recommended).</param>
+        /// <param name="httpClient">Direct HttpClient instance (fallback, not recommended for production).</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// Priority order: httpClientFactory > httpClient > new HttpClient().
+        /// Using IHttpClientFactory is recommended to avoid socket exhaustion issues.
+        /// </remarks>
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
+            IHttpClientFactory? httpClientFactory = null,
             HttpClient? httpClient = null,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
-            _ownsHttpClient = httpClient == null;
-            _httpClient = httpClient ?? new HttpClient();
+
+            // Priority: IHttpClientFactory > HttpClient > new HttpClient()
+            if (httpClientFactory != null)
+            {
+                _httpClient = httpClientFactory.CreateClient(HttpClientName);
+                _ownsHttpClient = false; // Never own HttpClient from factory
+            }
+            else if (httpClient != null)
+            {
+                _httpClient = httpClient;
+                _ownsHttpClient = false; // Don't own injected HttpClient
+            }
+            else
+            {
+                _httpClient = new HttpClient();
+                _ownsHttpClient = true; // We own this one
+            }
         }
 
         /// <summary>
@@ -492,46 +522,4 @@ namespace MailSenderLib.Services
         }
     }
 
-    // Custom contract resolver for @odata.type
-    internal class ODataContractResolver : Newtonsoft.Json.Serialization.DefaultContractResolver
-    {
-        protected override string ResolvePropertyName(string propertyName)
-        {
-            if (propertyName == "odataType")
-                return "@odata.type";
-            return base.ResolvePropertyName(propertyName);
-        }
-    }
-
-    // Strongly-typed payload classes for better performance and type safety
-    internal class MessagePayload
-    {
-        public string? Subject { get; set; }
-        public BodyPayload? Body { get; set; }
-        public List<RecipientPayload>? ToRecipients { get; set; }
-        public List<RecipientPayload>? CcRecipients { get; set; }
-        public List<RecipientPayload>? BccRecipients { get; set; }
-    }
-
-    internal class BodyPayload
-    {
-        public string ContentType { get; set; } = string.Empty;
-        public string Content { get; set; } = string.Empty;
-    }
-
-    internal class RecipientPayload
-    {
-        public EmailAddressPayload? EmailAddress { get; set; }
-    }
-
-    internal class EmailAddressPayload
-    {
-        public string Address { get; set; } = string.Empty;
-    }
-
-    public class EmailAttachment
-    {
-        public string FileName { get; set; } = string.Empty;
-        public string FilePath { get; set; } = string.Empty;
-    }
 }

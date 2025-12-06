@@ -369,14 +369,14 @@ namespace MailSenderLibTester
 
                 try
                 {
-                    var attachments1 = _attachmentPaths.Select(a => new EmailAttachment
+                    var attachments = _attachmentPaths.Select(a => new EmailAttachment
                     {
                         FileName = Path.GetFileName(a),
                         FilePath = a
                     }).ToList();
 
 
-                    var mailService = new GraphMailSender(optionsAuth, _logger);
+                    var mailService = new GraphMailSender(optionsAuth, null, null, _logger);
 
 
                     await mailService.SendEmailAsync(
@@ -386,7 +386,7 @@ namespace MailSenderLibTester
                         subject: subject,
                         body: body,
                         isHtml: isHtml,
-                        attachments: attachments1,
+                        attachments: attachments,
                         fromEmail: optionsAuth.MailboxAddress
                     );
                 }
