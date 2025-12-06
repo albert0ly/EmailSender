@@ -138,6 +138,9 @@ namespace MailSenderLib.Services
 
             try
             {
+                if (toRecipients == null || !(toRecipients.Count > 0))
+                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
+
                 var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                 _httpClient.DefaultRequestHeaders.Authorization =
                     new AuthenticationHeaderValue("Bearer", token.Token);
@@ -521,5 +524,4 @@ namespace MailSenderLib.Services
             GC.SuppressFinalize(this);
         }
     }
-
 }
