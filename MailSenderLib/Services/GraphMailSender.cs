@@ -1,70 +1,115 @@
-using Azure.Core;
+﻿using Azure.Core;
 using Azure.Identity;
+using MailSenderLib.Exceptions;
+using MailSenderLib.Interfaces;
+using MailSenderLib.Logging;
+using MailSenderLib.Models;
+using MailSenderLib.Options;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+
 namespace MailSenderLib.Services
 {
-    /// <summary>
-    /// Lightweight Graph email sender usable from .NET Standard2.0 via Graph REST APIs and Azure.Identity.
-    /// </summary>
-    public class GraphMailSender : Interfaces.IGraphMailSender, IDisposable
+    public class GraphMailSender : IDisposable, IGraphMailSender
     {
-        private readonly MailSenderLib.Options.GraphMailOptions _options;
+        private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
+        private const int ChunkSize = 5 * 1024 * 1024; // 5MB
+        private readonly GraphMailOptionsAuth _optionsAuth;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
-        private static readonly Uri GraphBaseUri = new Uri("https://graph.microsoft.com/v1.0/");
+        private readonly HttpClient _httpClient;
+        private readonly bool _ownsHttpClient;
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
+        private const string HttpClientName = "GraphMailSender";
 
         // Cached token and lock for refresh
         private AccessToken _cachedToken;
+
         private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
-        // safety buffer before expiry to force refresh
-        private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
 
-        // LoggerMessage delegates (avoid allocation-heavy LoggerExtensions calls)
-        private static readonly Action<ILogger, Exception?> _logFailedToAcquireToken =
-            LoggerMessage.Define(LogLevel.Error, new EventId(1000, nameof(_logFailedToAcquireToken)), "Failed to acquire access token for GraphMailSender");
-        private static readonly Action<ILogger, Exception?> _logRefreshingToken =
-            LoggerMessage.Define(LogLevel.Debug, new EventId(1001, nameof(_logRefreshingToken)), "Refreshing access token for GraphMailSender");
-        private static readonly Action<ILogger, DateTimeOffset, Exception?> _logTokenAcquired =
-            LoggerMessage.Define<DateTimeOffset>(LogLevel.Debug, new EventId(1002, nameof(_logTokenAcquired)), "Access token acquired, expires on {ExpiresOn}");
-        private static readonly Action<ILogger, string, Exception?> _logUploadSessionUrl =
-            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1013, nameof(_logUploadSessionUrl)), "Upload session URL: {Url}");
-        private static readonly Action<ILogger, long, long, long, int, Exception?> _logChunkStatus =
-            LoggerMessage.Define<long, long, long, int>(LogLevel.Debug, new EventId(1010, nameof(_logChunkStatus)), "Chunk {Start}-{End}/{Total}, Status {Status}");
-        private static readonly Action<ILogger, string, Exception?> _logResponseBodyTrace =
-            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(_logResponseBodyTrace)), "{Body}");
-        private static readonly Action<ILogger, string, Exception?> _logUploadComplete =
-            LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1012, nameof(_logUploadComplete)), "Upload complete for {FileName}");
-        private static readonly Action<ILogger, int, string, string, Exception?> _logChunkFailed =
-            LoggerMessage.Define<int, string, string>(LogLevel.Error, new EventId(1014, nameof(_logChunkFailed)), "Chunk upload failed {Status} {Reason} - {Body}");
-
-        public GraphMailSender(MailSenderLib.Options.GraphMailOptions options, object? logger = null)
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class using IHttpClientFactory (recommended).
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="httpClientFactory">IHttpClientFactory for creating HttpClient instances.</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// Using IHttpClientFactory is recommended to avoid socket exhaustion issues.
+        /// The factory manages the HttpClient lifecycle automatically.
+        /// </remarks>
+        public GraphMailSender(
+            GraphMailOptionsAuth optionsAuth,
+            IHttpClientFactory httpClientFactory,
+            ILogger<GraphMailSender>? logger = null)
         {
-            _options = options ?? throw new ArgumentNullException(nameof(options));
-            _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
-            _logger = logger as ILogger<GraphMailSender>;
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
+            _logger = logger;
+            _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient(HttpClientName);
+            _ownsHttpClient = false; // Never own HttpClient from factory
         }
 
-        private static async Task EnsureSuccess(HttpResponseMessage resp, string action, CancellationToken ct)
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class using a direct HttpClient instance.
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="httpClient">HttpClient instance to use.</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// Note: The provided HttpClient will not be disposed by this class.
+        /// For production use, prefer the constructor with IHttpClientFactory.
+        /// </remarks>
+        public GraphMailSender(
+            GraphMailOptionsAuth optionsAuth,
+            HttpClient httpClient,
+            ILogger<GraphMailSender>? logger = null)
         {
-            if (!resp.IsSuccessStatusCode)
-            {
-                var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                throw new InvalidOperationException($"Failed to {action}: {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}");
-            }
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
+            _logger = logger;
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _ownsHttpClient = false; // Don't own injected HttpClient
         }
 
-        // Return a cached token if valid, otherwise refresh in a thread-safe manner
+        /// <summary>
+        /// Initializes a new instance of the GraphMailSender class.
+        /// Creates a new HttpClient instance internally (not recommended for production).
+        /// </summary>
+        /// <param name="optionsAuth">Graph authentication options (required).</param>
+        /// <param name="logger">Optional logger instance.</param>
+        /// <remarks>
+        /// This constructor creates a new HttpClient instance which can lead to socket exhaustion.
+        /// For production use, prefer the constructor with IHttpClientFactory.
+        /// </remarks>
+        public GraphMailSender(
+            GraphMailOptionsAuth optionsAuth,
+            ILogger<GraphMailSender>? logger = null)
+        {
+            _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
+            _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
+            _logger = logger;
+            _httpClient = new HttpClient();
+            _ownsHttpClient = true; // We own this one
+        }
+
+        /// <summary> 
+        /// Get access token using client credentials flow with proper caching and expiration handling
+        /// </summary>
         private async Task<AccessToken> GetAccessTokenAsync(CancellationToken ct)
         {
             // fast-path without locking
@@ -82,15 +127,16 @@ namespace MailSenderLib.Services
                     return _cachedToken;
                 }
 
-                if (_logger != null) _logRefreshingToken(_logger, null);
+                _logger?.LogRefreshingToken();
+
                 var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
                 _cachedToken = token;
-                if (_logger != null) _logTokenAcquired(_logger, _cachedToken.ExpiresOn, null);
+                _logger?.LogTokenAcquired(_cachedToken.ExpiresOn);
                 return _cachedToken;
             }
             catch (Exception ex)
             {
-                if (_logger != null) _logFailedToAcquireToken(_logger, ex);
+                _logger?.LogFailedToAcquireToken(ex);
                 throw;
             }
             finally
@@ -99,174 +145,429 @@ namespace MailSenderLib.Services
             }
         }
 
+        /// <summary>
+        /// Send email with large attachments without saving to Sent Items
+        /// </summary>
+        [SuppressMessage("Usage", "CA2219:Do not raise exceptions in finally clauses",
+                        Justification = "Exception is stored and thrown after finally block completes")]
         public async Task SendEmailAsync(
-            IEnumerable<string> toRecipients,
-            IEnumerable<string>? ccRecipients,
-            IEnumerable<string>? bccRecipients,
+            List<string> toRecipients,
+            List<string>? ccRecipients,
+            List<string>? bccRecipients,
             string subject,
             string body,
-            bool isHtml,
-            IEnumerable<(string FileName, string ContentType, Stream ContentStream)>? attachments,
-            CancellationToken cancellationToken = default)
+            bool isHtml=true,
+            List<EmailAttachment>? attachments=null,
+            string? fromEmail = null,
+            CancellationToken ct = default)
         {
-            if (toRecipients == null) throw new ArgumentNullException(nameof(toRecipients));
-            var toList = new List<string>(toRecipients);
-            var ccList = ccRecipients != null ? new List<string>(ccRecipients) : new List<string>();
-            var bccList = bccRecipients != null ? new List<string>(bccRecipients) : new List<string>();
-            if (toList.Count == 0) throw new ArgumentException("At least one recipient is required.", nameof(toRecipients));
+            bool draftCreated = false;
+            string messageId = string.Empty;
+            Exception? originalException = null;
 
-            // Acquire token (cached)
-            var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-
-            using (var http = new HttpClient() { BaseAddress = GraphBaseUri })
+            try
             {
-                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+                if (toRecipients == null || !(toRecipients.Count > 0))
+                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
-                //1. Create draft message
-                var draftPayload = BuildCreateMessagePayload(toList, ccList, bccList, subject, body, isHtml);
-                var draftResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages", new StringContent(draftPayload, System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
-                await EnsureSuccess(draftResp, "create draft", cancellationToken).ConfigureAwait(false);
-                var draftJson = await draftResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var draftIdMaybe = Newtonsoft.Json.Linq.JObject.Parse(draftJson).Value<string>("id");
-                if (string.IsNullOrWhiteSpace(draftIdMaybe)) throw new InvalidOperationException("Failed to obtain draft id.");
-                string draftId = draftIdMaybe!;
+                var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+                _httpClient.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Bearer", token.Token);
 
-                //2. Upload attachments using upload session (handles large files and unknown lengths)
-                if (attachments != null)
+                fromEmail ??= _optionsAuth.MailboxAddress;
+
+                _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
+
+                // Step 1: Create draft message using Newtonsoft.Json serialization
+                var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
+
+                var message = new MessagePayload
                 {
-                    foreach (var att in attachments)
+                    Subject = subject,
+                    Body = new BodyPayload
                     {
-                        await UploadAttachmentAsync(http, _options.MailboxAddress, draftId!, att.FileName, att.ContentType, att.ContentStream, cancellationToken).ConfigureAwait(false);
+                        ContentType = isHtml ? "HTML" : "Text",
+                        Content = body
+                    },
+                    ToRecipients = toRecipients.Select(email => new RecipientPayload
+                    {
+                        EmailAddress = new EmailAddressPayload { Address = email }
+                    }).ToList()
+                };
+
+                if (ccRecipients != null && ccRecipients.Count > 0)
+                {
+                    message.CcRecipients = ccRecipients.Select(email => new RecipientPayload
+                    {
+                        EmailAddress = new EmailAddressPayload { Address = email }
+                    }).ToList();
+                }
+
+                if (bccRecipients != null && bccRecipients.Count > 0)
+                {
+                    message.BccRecipients = bccRecipients.Select(email => new RecipientPayload
+                    {
+                        EmailAddress = new EmailAddressPayload { Address = email }
+                    }).ToList();
+                }
+
+                var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
+                {
+                    NullValueHandling = NullValueHandling.Ignore,
+                    ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
+                });
+
+                var messageContent = new StringContent(messageJson, Encoding.UTF8, "application/json");
+                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent, ct).ConfigureAwait(false);
+
+                if (!messageResponse.IsSuccessStatusCode)
+                {
+                    var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
+                    _logger?.LogFailedToCreateMessage(error);
+                    throw new GraphMailFailedCreateMessageException($"Failed to create message: {error}");
+                }
+
+                var messageResponseBody = await messageResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var createdMessage = JObject.Parse(messageResponseBody);
+                messageId = createdMessage["id"]?.ToString()
+                    ?? throw new GraphMailFailedCreateMessageException($"Message ID not found in response: {messageResponseBody}");
+
+                _logger?.LogDraftCreated(messageId);
+                draftCreated = true;
+
+                // Step 2: Attach files (stream large files, direct upload small files)
+                if (attachments != null && attachments.Count > 0)
+                {
+                    foreach (var attachment in attachments)
+                    {
+                        if (!File.Exists(attachment.FilePath))
+                        {
+                            throw new FileNotFoundException($"Attachment file not found: {attachment.FilePath}", attachment.FilePath);
+                        }
+
+                        var fileInfo = new FileInfo(attachment.FilePath);
+                        if (fileInfo.Length == 0)
+                        {
+                            throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
+                        }
+                        var fileSize = fileInfo.Length;
+
+                        _logger?.LogAttachingFile(attachment.FileName, fileSize);
+                        if (fileSize > LargeAttachmentThreshold) // > 3MB
+                        {
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, ct).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, ct).ConfigureAwait(false);
+                        }
                     }
                 }
 
-                //3. Send the message
-                var sendResp = await http.PostAsync($"users/{Uri.EscapeDataString(_options.MailboxAddress)}/messages/{Uri.EscapeDataString(draftId)}/send", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), cancellationToken).ConfigureAwait(false);
-                await EnsureSuccess(sendResp, "send message", cancellationToken).ConfigureAwait(false);
+                // Step 3: Get the complete message with attachments
+                var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
+                var getResponse = await _httpClient.GetAsync(getMessageUrl, ct).ConfigureAwait(false);
+                getResponse.EnsureSuccessStatusCode();
+
+                var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var completeMessage = JObject.Parse(completeMessageBody);
+
+                // Remove metadata and read-only fields
+                var cleanMessage = CleanMessageForSending(completeMessage);
+
+                // Step 4: Send using sendMail endpoint with SaveToSentItems = false
+                var sendUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/sendMail";
+
+                var sendPayload = new
+                {
+                    message = cleanMessage,
+                    saveToSentItems = false
+                };
+
+                var sendJson = JsonConvert.SerializeObject(sendPayload);
+                var sendContent = new StringContent(sendJson, Encoding.UTF8, "application/json");
+
+                var sendResponse = await _httpClient.PostAsync(sendUrl, sendContent, ct).ConfigureAwait(false);
+
+                if (!sendResponse.IsSuccessStatusCode)
+                {
+                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
+                    _logger?.LogFailedToSendMessage(error);
+                    throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
+                }
+
+                _logger?.LogMessageSent(messageId);
+            }
+            catch (Exception ex)
+            {
+                originalException = ex;
+                _logger?.LogFailedToSendMessage("", ex);
+
+                // Don't throw yet - we'll handle it in finally after cleanup attempt
+            }
+            finally
+            {
+                // Step 5: Delete the draft message if it was created
+                if (draftCreated && !string.IsNullOrEmpty(messageId))
+                {
+                    try
+                    {
+                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
+                        var deleteResponse = await _httpClient.DeleteAsync(deleteUrl, ct).ConfigureAwait(false);
+
+                        if (!deleteResponse.IsSuccessStatusCode)
+                        {
+                            var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
+                            _logger?.LogFailedToDeleteDraft(messageId, error);
+
+                            var cleanupEx = new GraphMailFailedDeleteDraftMessageException($"Failed to delete draft message {messageId}, Error {error}");
+
+                            if (originalException != null)
+                            {
+                                // Combine both exceptions
+                                originalException = new AggregateException(
+                                    "Email operation failed with multiple errors",
+                                    originalException,
+                                    cleanupEx);
+                            }
+                            else
+                            {
+                                // This is the only error
+                                originalException = cleanupEx;
+                            }
+                        }
+                    }
+                    catch (Exception cleanupEx)
+                    {
+                        if (originalException != null)
+                        {
+                            // Combine both exceptions
+                            originalException = new AggregateException(
+                                "Email operation failed with multiple errors",
+                                originalException,
+                                cleanupEx);
+                        }
+                        else
+                        {
+                            // This is the only error
+                            originalException = cleanupEx;
+                        }
+                    }
+                }
+
+                // Now throw if there was any exception
+                if (originalException != null)
+                {
+                    throw originalException;
+                }
             }
         }
 
-        private static string BuildCreateMessagePayload(List<string> to, List<string> cc, List<string> bcc, string subject, string body, bool isHtml)
+        private static JObject CleanMessageForSending(JObject completeMessage)
         {
-            string Escape(string s) => s?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
+            var cleanMessage = new JObject();
 
-            string Recipients(IEnumerable<string> addrs)
-                => string.Join(",", addrs.Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => "{\"emailAddress\":{\"address\":\"" + Escape(a.Trim()) + "\"}}"));
+            // Copy only the fields needed for sending
+            if (completeMessage["subject"] != null)
+                cleanMessage["subject"] = completeMessage["subject"];
+            if (completeMessage["body"] != null)
+                cleanMessage["body"] = completeMessage["body"];
+            if (completeMessage["toRecipients"] != null)
+                cleanMessage["toRecipients"] = completeMessage["toRecipients"];
+            if (completeMessage["ccRecipients"] != null)
+                cleanMessage["ccRecipients"] = completeMessage["ccRecipients"];
+            if (completeMessage["bccRecipients"] != null)
+                cleanMessage["bccRecipients"] = completeMessage["bccRecipients"];
+            if (completeMessage["replyTo"] != null)
+                cleanMessage["replyTo"] = completeMessage["replyTo"];
+            if (completeMessage["from"] != null)
+                cleanMessage["from"] = completeMessage["from"];
+            if (completeMessage["importance"] != null)
+                cleanMessage["importance"] = completeMessage["importance"];
 
-            var contentType = isHtml ? "HTML" : "Text";
-            var json = $"{{\n \"subject\": \"{Escape(subject)}\",\n \"body\": {{ \"contentType\": \"{contentType}\", \"content\": \"{Escape(body)}\" }},\n \"toRecipients\": [ {Recipients(to)} ],\n \"ccRecipients\": [ {Recipients(cc)} ],\n \"bccRecipients\": [ {Recipients(bcc)} ]\n}}";
-            return json;
+            // Clean attachments - remove metadata fields
+            if (completeMessage["attachments"] != null)
+            {
+                if (completeMessage["attachments"] is JArray attachmentsArray && attachmentsArray.Count > 0)
+                {
+                    var cleanAttachments = new JArray();
+                    foreach (var item in attachmentsArray)
+                    {
+                        if (item is JObject att)  // Explicit cast with pattern matching
+                        {
+                            var cleanAtt = new JObject();
+                            if (att["@odata.type"] != null)
+                                cleanAtt["@odata.type"] = att["@odata.type"];
+                            if (att["name"] != null)
+                                cleanAtt["name"] = att["name"];
+                            if (att["contentType"] != null)
+                                cleanAtt["contentType"] = att["contentType"];
+                            if (att["contentBytes"] != null)
+                                cleanAtt["contentBytes"] = att["contentBytes"];
+                            if (att["size"] != null)
+                                cleanAtt["size"] = att["size"];
+                            cleanAttachments.Add(cleanAtt);
+                        }
+                    }
+                    cleanMessage["attachments"] = cleanAttachments;
+                }
+            }
+
+            return cleanMessage;
         }
 
-        private async Task UploadAttachmentAsync(
-            HttpClient http,
-            string mailbox,
-            string draftId,
-            string fileName,
-            string contentType,
-            Stream content,
-            CancellationToken ct)
+        private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
+            string fileName, string filePath, CancellationToken ct)
         {
-            if (!content.CanSeek)
-                throw new InvalidOperationException("Stream must support seeking for chunked upload.");
+            var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
 
-            long totalSize = content.Length;
-            content.Position = 0;
+            // Read file and encode to base64
+            var fileBytes = File.ReadAllBytes(filePath);
+            var base64Content = Convert.ToBase64String(fileBytes);
 
-            // -------------------------------
-            // 1. Create upload session
-            // -------------------------------
-            var payload = new
+            var attachment = new
             {
-                attachmentItem = new
+                odataType = "#microsoft.graph.fileAttachment",
+                name = fileName,
+                contentBytes = base64Content
+            };
+
+            var json = JsonConvert.SerializeObject(attachment, new JsonSerializerSettings
+            {
+                ContractResolver = new ODataContractResolver()
+            });
+
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var response = await _httpClient.PostAsync(attachUrl, content, ct).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            _logger?.LogSmallAttachmentAdded(fileName);
+        }
+
+        private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
+            string fileName, string filePath, long fileSize, CancellationToken ct)
+        {
+            // Create upload session
+            var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
+
+            var sessionData = new
+            {
+                AttachmentItem = new
                 {
                     attachmentType = "file",
                     name = fileName,
-                    size = totalSize,
-                    contentType = string.IsNullOrWhiteSpace(contentType)
-                        ? "application/octet-stream"
-                        : contentType
+                    size = fileSize
                 }
             };
 
-            var startSessionJson = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
-            var sessionResp = await http.PostAsync(
-                $"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(draftId)}/attachments/createUploadSession",
-                new StringContent(startSessionJson, System.Text.Encoding.UTF8, "application/json"),
-                ct
-            ).ConfigureAwait(false);
+            var sessionJson = JsonConvert.SerializeObject(sessionData);
+            var sessionContent = new StringContent(sessionJson, Encoding.UTF8, "application/json");
 
-            await EnsureSuccess(sessionResp, "create upload session", ct).ConfigureAwait(false);
-
-            var sessionJson = await sessionResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var uploadUrl = Newtonsoft.Json.Linq.JObject.Parse(sessionJson).Value<string>("uploadUrl");
-
-            if (string.IsNullOrWhiteSpace(uploadUrl))
-                throw new InvalidOperationException("Upload session URL not found.");
-
-            if (_logger != null) _logUploadSessionUrl(_logger, uploadUrl, null);
-
-            // -------------------------------
-            // 2. Upload chunks
-            // -------------------------------
-            const int chunkSize = 5 * 1024 * 1024; // 5 MB
-            byte[] buffer = new byte[chunkSize];
-            long start = 0;
-
-            using (var uploadClient = new HttpClient()) // fresh client
+            var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent, ct).ConfigureAwait(false);
+            if (!sessionResponse.IsSuccessStatusCode)
             {
-                while (start < totalSize)
-                {
-                    int read = await content.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
-                    if (read <= 0) break;
-
-                    long end = start + read - 1;
-
-                    using (var put = new HttpRequestMessage(HttpMethod.Put, new Uri(uploadUrl, UriKind.Absolute)))
-                    {
-                        put.Content = new ByteArrayContent(buffer, 0, read);
-                        put.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-                        put.Content.Headers.ContentLength = read;
-                        // IMPORTANT: Content-Range must be a content header so proxies/HttpClient don't strip it
-                        put.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {start}-{end}/{totalSize}");
-
-                        var resp = await uploadClient.SendAsync(put, ct).ConfigureAwait(false);
-                        var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-                        if (_logger != null) _logChunkStatus(_logger, start, end, totalSize, (int)resp.StatusCode, null);
-                        if (_logger != null) _logResponseBodyTrace(_logger, body, null);
-
-                        if ((int)resp.StatusCode == 200 || (int)resp.StatusCode == 201)
-                        {
-                            if (_logger != null) _logUploadComplete(_logger, fileName, null);
-                            return;
-                        }
-                        else if ((int)resp.StatusCode != 202)
-                        {
-                            if (_logger != null) _logChunkFailed(_logger, (int)resp.StatusCode, resp.ReasonPhrase, body, null);
-                            throw new InvalidOperationException(
-                                $"Chunk upload failed {(int)resp.StatusCode} {resp.ReasonPhrase} - {body}"
-                            );
-                        }
-
-                        start = end + 1;
-                    }
-                }
+                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);
+                throw new InvalidOperationException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
             }
 
-            if (_logger != null) _logUploadComplete(_logger, fileName, null);
+            var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var sessionInfo = JObject.Parse(sessionResponseBody);
+            var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");
+
+            _logger?.LogUploadSessionUrl(uploadUrl, fileName);
+
+            // Upload in chunks using streaming (5MB chunks)                    
+            var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
+            long offset = 0;
+            
+            try 
+            {
+                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+                {
+                    while (offset < fileSize)
+                    {
+                        int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+                        if (bytesRead <= 0) break;
+
+                        long end = offset + bytesRead - 1;
+
+                        var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+                        {
+                            Content = new ByteArrayContent(buffer, 0, bytesRead)
+                        };
+
+                        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                        request.Content.Headers.ContentLength = bytesRead;
+                        request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+
+                        // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
+                        var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
+                            throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                        }
+
+                        var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                        // Update offset
+                        offset = end + 1;
+                        _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
+
+                        // Check if there are more chunks to upload by looking at nextExpectedRanges
+                        if (!string.IsNullOrWhiteSpace(responseBody))
+                        {
+                            var responseJson = JObject.Parse(responseBody);
+                            if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
+                            {
+                                // There are more chunks expected, continue uploading                            
+                                _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
+                                continue;
+                            }
+                        }
+
+                        // No nextExpectedRanges means upload is complete                    
+                        _logger?.LogUploadComplete(fileName);
+                        return;
+                    }
+                }
+
+                _logger?.LogUploadComplete(fileName);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+
+        }
+
+        private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
+        {
+            try
+            {
+                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return $"Status: {response.StatusCode}, Body: {errorBody}";
+            }
+            catch
+            {
+                return $"Status: {response.StatusCode}";
+            }
         }
 
         public void Dispose()
         {
-            try
+            _tokenLock?.Dispose();
+            // Only dispose HttpClient if we own it (created it, not injected)
+            if (_ownsHttpClient)
             {
-                _tokenLock?.Dispose();
+                _httpClient?.Dispose();
             }
-            catch
-            {
-                // ignore
-            }
+            (_credential as IDisposable)?.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 }

@@ -1,12 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies> 
     <LangVersion>8.0</LangVersion>
     <Nullable>enable</Nullable>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <GenerateDocumentationFile>False</GenerateDocumentationFile>
 
     <!-- Keep AssemblyVersion stable for compatibility; only bump manually on breaking changes -->
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
 
     <!-- Build number parts: day of year and HHmm to keep values within 0..65535 -->
     <BuildDay>$([System.DateTime]::UtcNow.DayOfYear)</BuildDay>
@@ -21,10 +22,10 @@
 
     <!-- Human-readable informational version. Use full UTC date/time to be friendly and recognizable. -->
     <BuildDateUtc>$([System.DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm 'UTC'"))</BuildDateUtc>
-    <InformationalVersion>1.0.0 (build $(BuildDateUtc))</InformationalVersion>
+    <InformationalVersion>1.1.0 (build $(BuildDateUtc))</InformationalVersion>
 
     <!-- Explicitly set AssemblyInformationalVersion to prefer our string; some toolchains may still append metadata after this value, but this sets the base value -->
-    <AssemblyInformationalVersion>1.0.0 (build $(BuildDateUtc))</AssemblyInformationalVersion>
+    <AssemblyInformationalVersion>1.1.0 (build $(BuildDateUtc))</AssemblyInformationalVersion>
 
     <!-- Optional: basic product/company attributes for cleaner file properties -->
     <Company>Infobay</Company>
@@ -43,12 +44,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Azure.Identity" Version="1.11.4" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="7.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Compatibility\" />
+    <PackageReference Include="Azure.Identity" Version="1.17.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
   </ItemGroup>
 </Project>

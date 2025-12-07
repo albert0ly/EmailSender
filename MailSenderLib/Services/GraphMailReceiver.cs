@@ -1,17 +1,14 @@
 using Azure.Core;
 using Azure.Identity;
+using MailSenderLib.Models;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
-using MailSenderLib.Models;
 
 namespace MailSenderLib.Services
 {
@@ -20,7 +17,7 @@ namespace MailSenderLib.Services
     /// </summary>
     public class GraphMailReceiver : Interfaces.IGraphMailReceiver, IDisposable
     {
-        private readonly MailSenderLib.Options.GraphMailOptions _options;
+        private readonly MailSenderLib.Options.GraphMailOptionsAuth _options;
         private readonly ClientSecretCredential _credential;
         private readonly HttpClient? _httpClient;
         private readonly ILogger<GraphMailReceiver>? _logger;
@@ -49,7 +46,7 @@ namespace MailSenderLib.Services
         /// </summary>
         /// <param name="options">Graph authentication and mailbox options.</param>
         /// <param name="httpClient">Optional HttpClient for testing/DI. If not provided a new HttpClient will be created per call.</param>
-        public GraphMailReceiver(MailSenderLib.Options.GraphMailOptions options, HttpClient? httpClient = null, object? logger = null)
+        public GraphMailReceiver(MailSenderLib.Options.GraphMailOptionsAuth options, HttpClient? httpClient = null, object? logger = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _credential = new ClientSecretCredential(_options.TenantId, _options.ClientId, _options.ClientSecret);
@@ -276,11 +273,15 @@ namespace MailSenderLib.Services
             return result;
         }
 
+
+
+
         public void Dispose()
         {
             try
             {
                 _tokenLock?.Dispose();
+                GC.SuppressFinalize(this);
             }
             catch
             {

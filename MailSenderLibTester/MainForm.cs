@@ -1,17 +1,22 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using System.Configuration;
 using MailSenderLib;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
 using MailSenderLib.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Serilog;
+using Serilog.Core;
+using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Configuration;
 using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Net.Mail;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace MailSenderLibTester
 {
@@ -31,11 +36,29 @@ namespace MailSenderLibTester
         private ListBox _lstRecvAttachments;
         private PictureBox _pbPreview;
         private Label _lblRecvStatus;
+        private readonly ILogger<GraphMailSender> _logger;
 
         public MainForm()
         {
             InitializeComponent();
             LoadConfigIntoFields();
+
+            Log.Logger = new LoggerConfiguration()
+                .MinimumLevel.Debug()
+                .WriteTo.Console()
+                .WriteTo.File(
+                    path: "logs/app-.log",          // note the "-" for rolling
+                    rollingInterval: RollingInterval.Day,
+                    retainedFileCountLimit: 7,      // keep last 7 days
+                    shared: true
+                ).CreateLogger();
+
+            var loggerFactory = LoggerFactory.Create(builder =>
+            {
+                builder.AddSerilog();   // register Serilog provider
+            });
+
+            _logger = loggerFactory.CreateLogger<GraphMailSender>();            
 
             // Build runtime TabControl and move existing send controls into first tab
             SetupTabs();
@@ -50,9 +73,10 @@ namespace MailSenderLibTester
 
             // Move existing top-level controls into Send tab. We assume designer created these controls with known names.
             var sendControlNames = new[] {
-                "txtTenant","txtClientId","txtClientSecret","txtMailbox",
+                "txtTenant", "lblTenant", "txtClientId","txtClientSecret", "lblClientSecret", "lblClientId", "txtMailbox",
                 "txtTo","txtCc","txtBcc","txtSubject","txtBody",
-                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend"
+                "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "btnSend2", "checkSaveInSent","lblMailbox",
+                "lblTo","lblCc","lblBcc","lblSubject","lblBody"
             };
 
             foreach (var name in sendControlNames)
@@ -154,7 +178,7 @@ namespace MailSenderLibTester
             _lblRecvStatus.Text = "Fetching...";
             try
             {
-                var options = new GraphMailOptions
+                var options = new GraphMailOptionsAuth
                 {
                     TenantId = txtTenant != null ? txtTenant.Text.Trim() : string.Empty,
                     ClientId = txtClientId != null ? txtClientId.Text.Trim() : string.Empty,
@@ -235,59 +259,6 @@ namespace MailSenderLibTester
             }
         }
 
-        private async void btnSend_Click(object sender, EventArgs e)
-        {
-            btnSend.Enabled = false;
-            lblStatus.Text = "Sending...";
-            try
-            {
-                var options = new GraphMailOptions
-                {
-                    TenantId = txtTenant.Text.Trim(),
-                    ClientId = txtClientId.Text.Trim(),
-                    ClientSecret = txtClientSecret.Text.Trim(),
-                    MailboxAddress = txtMailbox.Text.Trim()
-                };
-                var senderLib = new GraphMailSender(options);
-
-                var to = SplitEmails(txtTo.Text);
-                var cc = SplitEmails(txtCc.Text);
-                var bcc = SplitEmails(txtBcc.Text);
-                var subject = txtSubject.Text;
-                var body = txtBody.Text;
-                var isHtml = chkIsHtml.Checked;
-
-                var streams = new List<Stream>();
-                try
-                {
-                    var atts = _attachmentPaths.Select(p =>
-                    {
-                        var s = (Stream)File.OpenRead(p);
-                        streams.Add(s);
-                        return (FileName: Path.GetFileName(p), ContentType: GetMimeType(p), ContentStream: s);
-                    }).ToList();
-
-                    await senderLib.SendEmailAsync(to, cc, bcc, subject, body, isHtml, atts);
-                }
-                finally
-                {
-                    foreach (var s in streams)
-                    {
-                        try { s.Dispose(); } catch { }
-                    }
-                }
-                lblStatus.Text = "Sent";
-            }
-            catch (Exception ex)
-            {
-                lblStatus.Text = ex.Message;
-            }
-            finally
-            {
-                btnSend.Enabled = true;
-            }
-        }
-
         private void LoadConfigIntoFields()
         {
             try
@@ -361,6 +332,77 @@ namespace MailSenderLibTester
                 case ".jpeg": return "image/jpeg";
                 case ".png": return "image/png";
                 default: return "application/octet-stream";
+            }
+        }
+
+        private void label1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private async void btnSend2_Click(object sender, EventArgs e)
+        {
+            btnSend2.Enabled = false;
+            lblStatus.Text = "Sending...";
+            try
+            {
+                var optionsAuth = new GraphMailOptionsAuth
+                {
+                    TenantId = txtTenant.Text.Trim(),
+                    ClientId = txtClientId.Text.Trim(),
+                    ClientSecret = txtClientSecret.Text.Trim(),
+                    MailboxAddress = txtMailbox.Text.Trim()
+                };
+
+                var options = new GraphMailOptions
+                {
+                    MoveToSentFolder = checkSaveInSent.Checked,
+                    MarkAsRead = false
+                };
+
+                var to = SplitEmails(txtTo.Text);
+                var cc = SplitEmails(txtCc.Text);
+                var bcc = SplitEmails(txtBcc.Text);
+                var subject = txtSubject.Text;
+                var body = txtBody.Text;
+                var isHtml = chkIsHtml.Checked;
+
+                try
+                {
+                    var attachments = _attachmentPaths.Select(a => new EmailAttachment
+                    {
+                        FileName = Path.GetFileName(a),
+                        FilePath = a
+                    }).ToList();
+
+
+                    var mailService = new GraphMailSender(optionsAuth, _logger);
+
+
+                    await mailService.SendEmailAsync(
+                        toRecipients: to,
+                        ccRecipients: cc,
+                        bccRecipients: bcc,
+                        subject: subject,
+                        body: body,
+                        isHtml: isHtml,
+                        attachments: attachments,
+                        fromEmail: optionsAuth.MailboxAddress
+                    );
+                }
+                finally
+                {
+
+                }
+                lblStatus.Text = "Sent";
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = ex.Message;
+            }
+            finally
+            {
+                btnSend2.Enabled = true;
             }
         }
     }
