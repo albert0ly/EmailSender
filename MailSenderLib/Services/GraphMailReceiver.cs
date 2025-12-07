@@ -281,6 +281,7 @@ namespace MailSenderLib.Services
             try
             {
                 _tokenLock?.Dispose();
+                GC.SuppressFinalize(this);
             }
             catch
             {
