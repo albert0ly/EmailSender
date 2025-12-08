@@ -6,10 +6,12 @@ using MailSenderLib.Logging;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
 using MailSenderLib.Extensions;
+using MailSenderLib.Utils;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Codeuctivity;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -170,13 +172,16 @@ namespace MailSenderLib.Services
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
-                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
-
-                token = (await GetAccessTokenAsync(ct).ConfigureAwait(false)).Token;
+                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));               
 
                 fromEmail ??= _optionsAuth.MailboxAddress;
 
                 _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
+
+                body = EmailSanitizer.SanitizeBody(body);
+                subject = EmailSanitizer.SanitizeSubject(subject);
+
+                token = (await GetAccessTokenAsync(ct).ConfigureAwait(false)).Token;
 
                 // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
@@ -417,10 +422,13 @@ namespace MailSenderLib.Services
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
             string fileName, string filePath, string token, CancellationToken ct)
         {
+            filePath = filePath.SanitizeFilename();
+            fileName = fileName.SanitizeFilename();
+
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
 
-            // Read file and encode to base64
-            var fileBytes = File.ReadAllBytes(filePath);
+            // Read file and encode to base64            
+            var fileBytes = await filePath.ReadAllBytesAsync(); 
             var base64Content = Convert.ToBase64String(fileBytes);
 
             var attachment = new
@@ -442,8 +450,11 @@ namespace MailSenderLib.Services
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize, string token, CancellationToken ct)
+    string fileName, string filePath, long fileSize, string token, CancellationToken ct)
         {
+            filePath = filePath.SanitizeFilename();
+            fileName = fileName.SanitizeFilename();
+
             // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
 
@@ -458,34 +469,46 @@ namespace MailSenderLib.Services
             };
 
             var sessionJson = JsonConvert.SerializeObject(sessionData);
- 
+
             var sessionResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct);
 
             if (!sessionResponse.IsSuccessStatusCode)
             {
                 var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                 _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);
-                throw new InvalidOperationException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
+                throw new GraphMailAttachmentException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
             }
 
             var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
             var sessionInfo = JObject.Parse(sessionResponseBody);
-            var uploadUrl = sessionInfo["uploadUrl"]?.ToString() ?? throw new InvalidOperationException("uploadUrl not found in response");
+            var uploadUrl = sessionInfo["uploadUrl"]?.ToString()
+                ?? throw new GraphMailAttachmentException("uploadUrl not found in response");
 
             _logger?.LogUploadSessionUrl(uploadUrl, fileName);
 
             // Upload in chunks using streaming (5MB chunks)                    
             var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
             long offset = 0;
-            
-            try 
+
+            try
             {
                 using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
                 {
                     while (offset < fileSize)
                     {
-                        int bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
-                        if (bytesRead <= 0) break;
+                        // Check cancellation before each chunk
+                        ct.ThrowIfCancellationRequested();
+
+                        int bytesRead = await fileStream.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct).ConfigureAwait(false);
+
+                        // FIXED: Validate that we read the expected number of bytes
+                        if (bytesRead <= 0)
+                        {
+                            throw new GraphMailAttachmentException(
+                                $"Unexpected end of file while uploading '{fileName}'. " +
+                                $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
+                                $"File size: {fileSize}, bytes uploaded: {offset}");
+                        }
 
                         long end = offset + bytesRead - 1;
 
@@ -505,7 +528,9 @@ namespace MailSenderLib.Services
                         {
                             var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                             _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
-                            throw new InvalidOperationException($"Chunk upload failed: {(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                            throw new GraphMailAttachmentException(
+                                $"Chunk upload failed for '{fileName}' at offset {offset}: " +
+                                $"{(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
                         }
 
                         var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -526,20 +551,36 @@ namespace MailSenderLib.Services
                             }
                         }
 
-                        // No nextExpectedRanges means upload is complete                    
-                        _logger?.LogUploadComplete(fileName);
-                        return;
+                        // No nextExpectedRanges means upload is complete
+                        break;
                     }
-                }
 
-                _logger?.LogUploadComplete(fileName);
+                    // FIXED: Final validation that we uploaded the complete file
+                    if (offset != fileSize)
+                    {
+                        throw new GraphMailAttachmentException(
+                            $"Incomplete file upload for '{fileName}'. " +
+                            $"Expected to upload {fileSize} bytes but only uploaded {offset} bytes. " +
+                            $"The file may have been truncated or modified during upload.");
+                    }
+
+                    _logger?.LogUploadComplete(fileName);
+                }
+            }
+            catch (OperationCanceledException ex)
+            {                
+                _logger?.LogUploadCancelled(fileName, offset, fileSize, ex);
+                throw;
+            }
+            catch (IOException ex)
+            {
+                throw new GraphMailAttachmentException(
+                    $"IO error while reading file '{fileName}' at offset {offset}: {ex.Message}", ex);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
-
-
         }
 
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)

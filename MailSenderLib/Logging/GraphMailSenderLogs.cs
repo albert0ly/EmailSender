@@ -66,6 +66,11 @@ namespace MailSenderLib.Logging
 
         internal static readonly Action<ILogger, string, Exception?> ResponseBodyTrace =
             LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(ResponseBodyTrace)), "{Body}");
+
+        internal static readonly Action<ILogger, string, long, long, Exception?> UploadCancelled =
+            LoggerMessage.Define<string, long, long>(LogLevel.Error, new EventId(1023, nameof(ResponseBodyTrace)),
+                "Upload of '{FileName}' was cancelled at offset {Offset}/{FileSize}");
+        
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -112,11 +117,14 @@ namespace MailSenderLib.Logging
         public static void LogUploadComplete(this ILogger logger, string fileName) =>
             GraphMailSenderLogs.UploadComplete(logger, fileName, null);
 
-        public static void LogChunkFailed(this ILogger logger, int status, string reason, string body , Exception? ex=null) =>
+        public static void LogChunkFailed(this ILogger logger, int status, string reason, string body, Exception? ex=null) =>
             GraphMailSenderLogs.ChunkFailed(logger, status, reason, body, ex);
 
         public static void LogResponseBodyTrace(this ILogger logger, string body) =>
             GraphMailSenderLogs.ResponseBodyTrace(logger, body, null);
+
+        public static void LogUploadCancelled(this ILogger logger, string fileName, long offset, long fileSize, Exception? ex=null) =>
+            GraphMailSenderLogs.UploadCancelled(logger, fileName, offset, fileSize, ex);
 
     }
 }
