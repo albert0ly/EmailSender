@@ -5,6 +5,7 @@ using MailSenderLib.Interfaces;
 using MailSenderLib.Logging;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
+using MailSenderLib.Extensions;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -164,15 +165,14 @@ namespace MailSenderLib.Services
             bool draftCreated = false;
             string messageId = string.Empty;
             Exception? originalException = null;
+            string token = string.Empty;
 
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
                     throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
-                var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                _httpClient.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", token.Token);
+                token = (await GetAccessTokenAsync(ct).ConfigureAwait(false)).Token;
 
                 fromEmail ??= _optionsAuth.MailboxAddress;
 
@@ -217,8 +217,7 @@ namespace MailSenderLib.Services
                     ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
                 });
 
-                var messageContent = new StringContent(messageJson, Encoding.UTF8, "application/json");
-                var messageResponse = await _httpClient.PostAsync(messageUrl, messageContent, ct).ConfigureAwait(false);
+                var messageResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, messageUrl, messageJson, token, ct);
 
                 if (!messageResponse.IsSuccessStatusCode)
                 {
@@ -255,18 +254,18 @@ namespace MailSenderLib.Services
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
                         {
-                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, ct).ConfigureAwait(false);
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, token, ct).ConfigureAwait(false);
                         }
                         else
                         {
-                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, ct).ConfigureAwait(false);
+                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, token, ct).ConfigureAwait(false);
                         }
                     }
                 }
 
                 // Step 3: Get the complete message with attachments
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
-                var getResponse = await _httpClient.GetAsync(getMessageUrl, ct).ConfigureAwait(false);
+                var getResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct);
                 getResponse.EnsureSuccessStatusCode();
 
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -285,9 +284,8 @@ namespace MailSenderLib.Services
                 };
 
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
-                var sendContent = new StringContent(sendJson, Encoding.UTF8, "application/json");
 
-                var sendResponse = await _httpClient.PostAsync(sendUrl, sendContent, ct).ConfigureAwait(false);
+                var sendResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct);
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
@@ -312,8 +310,8 @@ namespace MailSenderLib.Services
                 {
                     try
                     {
-                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
-                        var deleteResponse = await _httpClient.DeleteAsync(deleteUrl, ct).ConfigureAwait(false);
+                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";                        
+                        var deleteResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, token, ct);
 
                         if (!deleteResponse.IsSuccessStatusCode)
                         {
@@ -417,7 +415,7 @@ namespace MailSenderLib.Services
         }
 
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
-            string fileName, string filePath, CancellationToken ct)
+            string fileName, string filePath, string token, CancellationToken ct)
         {
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
 
@@ -437,15 +435,14 @@ namespace MailSenderLib.Services
                 ContractResolver = new ODataContractResolver()
             });
 
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await _httpClient.PostAsync(attachUrl, content, ct).ConfigureAwait(false);
+            var response = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, attachUrl, json, token, ct);
             response.EnsureSuccessStatusCode();
 
             _logger?.LogSmallAttachmentAdded(fileName);
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize, CancellationToken ct)
+            string fileName, string filePath, long fileSize, string token, CancellationToken ct)
         {
             // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
@@ -461,9 +458,9 @@ namespace MailSenderLib.Services
             };
 
             var sessionJson = JsonConvert.SerializeObject(sessionData);
-            var sessionContent = new StringContent(sessionJson, Encoding.UTF8, "application/json");
+ 
+            var sessionResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct);
 
-            var sessionResponse = await _httpClient.PostAsync(sessionUrl, sessionContent, ct).ConfigureAwait(false);
             if (!sessionResponse.IsSuccessStatusCode)
             {
                 var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
