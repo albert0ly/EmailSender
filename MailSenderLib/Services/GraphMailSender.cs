@@ -39,11 +39,6 @@ namespace MailSenderLib.Services
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
         private const string HttpClientName = "GraphMailSender";
 
-        // Cached token and lock for refresh
-        private AccessToken _cachedToken;
-
-        private readonly SemaphoreSlim _tokenLock = new SemaphoreSlim(1, 1);
-        private static readonly TimeSpan TokenExpiryBuffer = TimeSpan.FromSeconds(30);
 
         /// <summary>
         /// Initializes a new instance of the GraphMailSender class using IHttpClientFactory (recommended).
@@ -113,39 +108,12 @@ namespace MailSenderLib.Services
         /// <summary> 
         /// Get access token using client credentials flow with proper caching and expiration handling
         /// </summary>
-        private async Task<AccessToken> GetAccessTokenAsync(CancellationToken ct)
+        private async Task<string> GetAccessTokenAsync(CancellationToken ct)
         {
-            // fast-path without locking
-            if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
-            {
-                return _cachedToken;
-            }
-
-            await _tokenLock.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                // re-check after acquiring lock
-                if (!string.IsNullOrEmpty(_cachedToken.Token) && _cachedToken.ExpiresOn > DateTimeOffset.UtcNow.Add(TokenExpiryBuffer))
-                {
-                    return _cachedToken;
-                }
-
-                _logger?.LogRefreshingToken();
-
-                var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
-                _cachedToken = token;
-                _logger?.LogTokenAcquired(_cachedToken.ExpiresOn);
-                return _cachedToken;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogFailedToAcquireToken(ex);
-                throw;
-            }
-            finally
-            {
-                _tokenLock.Release();
-            }
+            // Simplified: rely on ClientSecretCredential built-in caching/refresh
+            var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
+            _logger?.LogTokenAcquired(token.ExpiresOn);
+            return token.Token;
         }
 
         /// <summary>
@@ -159,8 +127,8 @@ namespace MailSenderLib.Services
             List<string>? bccRecipients,
             string subject,
             string body,
-            bool isHtml=true,
-            List<EmailAttachment>? attachments=null,
+            bool isHtml = true,
+            List<EmailAttachment>? attachments = null,
             string? fromEmail = null,
             CancellationToken ct = default)
         {
@@ -172,7 +140,7 @@ namespace MailSenderLib.Services
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
-                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));               
+                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
                 fromEmail ??= _optionsAuth.MailboxAddress;
 
@@ -181,7 +149,8 @@ namespace MailSenderLib.Services
                 body = EmailSanitizer.SanitizeBody(body);
                 subject = EmailSanitizer.SanitizeSubject(subject);
 
-                token = (await GetAccessTokenAsync(ct).ConfigureAwait(false)).Token;
+                // Fetch token on demand
+                token = await GetAccessTokenAsync(ct);
 
                 // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages";
@@ -259,17 +228,19 @@ namespace MailSenderLib.Services
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
                         {
-                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, token, ct).ConfigureAwait(false);
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, ct).ConfigureAwait(false);
                         }
                         else
                         {
-                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, token, ct).ConfigureAwait(false);
+                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, ct).ConfigureAwait(false);
                         }
                     }
                 }
 
                 // Step 3: Get the complete message with attachments
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
+                // Fetch token on demand (again)
+                token = await GetAccessTokenAsync(ct);
                 var getResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct);
                 getResponse.EnsureSuccessStatusCode();
 
@@ -290,6 +261,7 @@ namespace MailSenderLib.Services
 
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
 
+                token = await GetAccessTokenAsync(ct);
                 var sendResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct);
 
                 if (!sendResponse.IsSuccessStatusCode)
@@ -315,8 +287,9 @@ namespace MailSenderLib.Services
                 {
                     try
                     {
-                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";                        
-                        var deleteResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, token, ct);
+                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
+                        var tokenForDelete = await GetAccessTokenAsync(ct);
+                        var deleteResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, tokenForDelete, ct);
 
                         if (!deleteResponse.IsSuccessStatusCode)
                         {
@@ -420,15 +393,15 @@ namespace MailSenderLib.Services
         }
 
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
-            string fileName, string filePath, string token, CancellationToken ct)
+            string fileName, string filePath, CancellationToken ct)
         {
-            filePath = filePath.SanitizeFilename();
+            // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
 
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
 
-            // Read file and encode to base64            
-            var fileBytes = await filePath.ReadAllBytesAsync(); 
+            // Read file and encode to base64
+            var fileBytes = await filePath.ReadAllBytesAsync();
             var base64Content = Convert.ToBase64String(fileBytes);
 
             var attachment = new
@@ -443,6 +416,7 @@ namespace MailSenderLib.Services
                 ContractResolver = new ODataContractResolver()
             });
 
+            var token = await GetAccessTokenAsync(ct);
             var response = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, attachUrl, json, token, ct);
             response.EnsureSuccessStatusCode();
 
@@ -450,9 +424,9 @@ namespace MailSenderLib.Services
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-    string fileName, string filePath, long fileSize, string token, CancellationToken ct)
+            string fileName, string filePath, long fileSize, CancellationToken ct)
         {
-            filePath = filePath.SanitizeFilename();
+            // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
 
             // Create upload session
@@ -470,6 +444,7 @@ namespace MailSenderLib.Services
 
             var sessionJson = JsonConvert.SerializeObject(sessionData);
 
+            var token = await GetAccessTokenAsync(ct);
             var sessionResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct);
 
             if (!sessionResponse.IsSuccessStatusCode)
@@ -486,7 +461,7 @@ namespace MailSenderLib.Services
 
             _logger?.LogUploadSessionUrl(uploadUrl, fileName);
 
-            // Upload in chunks using streaming (5MB chunks)                    
+            // Upload in chunks using streaming (5MB chunks)
             var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
             long offset = 0;
 
@@ -545,7 +520,7 @@ namespace MailSenderLib.Services
                             var responseJson = JObject.Parse(responseBody);
                             if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
                             {
-                                // There are more chunks expected, continue uploading                            
+                                // There are more chunks expected, continue uploading
                                 _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
                                 continue;
                             }
@@ -568,7 +543,7 @@ namespace MailSenderLib.Services
                 }
             }
             catch (OperationCanceledException ex)
-            {                
+            {
                 _logger?.LogUploadCancelled(fileName, offset, fileSize, ex);
                 throw;
             }
@@ -598,7 +573,6 @@ namespace MailSenderLib.Services
 
         public void Dispose()
         {
-            _tokenLock?.Dispose();
             // Only dispose HttpClient if we own it (created it, not injected)
             if (_ownsHttpClient)
             {
