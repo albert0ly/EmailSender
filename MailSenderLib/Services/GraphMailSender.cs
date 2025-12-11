@@ -1,17 +1,18 @@
 ﻿using Azure.Core;
 using Azure.Identity;
+using Codeuctivity;
 using MailSenderLib.Exceptions;
+using MailSenderLib.Extensions;
 using MailSenderLib.Interfaces;
 using MailSenderLib.Logging;
 using MailSenderLib.Models;
 using MailSenderLib.Options;
-using MailSenderLib.Extensions;
 using MailSenderLib.Utils;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Codeuctivity;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -20,10 +21,10 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Mime;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
 
 namespace MailSenderLib.Services
 {
@@ -224,15 +225,16 @@ namespace MailSenderLib.Services
                             throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
                         }
                         var fileSize = fileInfo.Length;
+                        var contentType = GetMimeType(attachment.FileName);
 
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
                         {
-                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, ct).ConfigureAwait(false);
+                            await UploadLargeAttachmentStreamAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
                         }
                         else
                         {
-                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, ct).ConfigureAwait(false);
+                            await AddSmallAttachmentAsync(fromEmail, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
                         }
                     }
                 }
@@ -393,7 +395,7 @@ namespace MailSenderLib.Services
         }
 
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
-            string fileName, string filePath, CancellationToken ct)
+            string fileName, string filePath, string contentType, CancellationToken ct)
         {
             // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
@@ -408,6 +410,7 @@ namespace MailSenderLib.Services
             {
                 odataType = "#microsoft.graph.fileAttachment",
                 name = fileName,
+                contentType = contentType,
                 contentBytes = base64Content
             };
 
@@ -424,7 +427,7 @@ namespace MailSenderLib.Services
         }
 
         private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize, CancellationToken ct)
+            string fileName, string filePath, long fileSize, string contentType, CancellationToken ct)
         {
             // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
@@ -492,7 +495,7 @@ namespace MailSenderLib.Services
                             Content = new ByteArrayContent(buffer, 0, bytesRead)
                         };
 
-                        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                        request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
                         request.Content.Headers.ContentLength = bytesRead;
                         request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
 
@@ -556,6 +559,14 @@ namespace MailSenderLib.Services
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+        }
+
+        private static string GetMimeType(string fileName)
+        {
+            var provider = new FileExtensionContentTypeProvider();
+            if (provider.TryGetContentType(fileName, out string contentType))
+                return contentType;
+            return "application/octet-stream"; // safe fallback
         }
 
         private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
