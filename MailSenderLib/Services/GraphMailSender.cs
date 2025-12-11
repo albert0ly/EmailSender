@@ -118,8 +118,96 @@ namespace MailSenderLib.Services
         }
 
         /// <summary>
-        /// Send email with large attachments without saving to Sent Items
+        /// Sends an email using Microsoft Graph API with support for large attachments.
         /// </summary>
+        /// <param name="toRecipients">
+        /// Required. A list of recipient email addresses to send the message to.
+        /// Must contain at least one valid recipient.
+        /// </param>
+        /// <param name="ccRecipients">
+        /// Optional. A list of CC (carbon copy) recipient email addresses.
+        /// </param>
+        /// <param name="bccRecipients">
+        /// Optional. A list of BCC (blind carbon copy) recipient email addresses.
+        /// </param>
+        /// <param name="subject">
+        /// Required. The subject line of the email. Subject is sanitized before sending.
+        /// </param>
+        /// <param name="body">
+        /// Required. The body content of the email. Content is sanitized before sending.
+        /// </param>
+        /// <param name="isHtml">
+        /// Optional. Indicates whether the body content is HTML (true) or plain text (false).
+        /// Default is true.
+        /// </param>
+        /// <param name="attachments">
+        /// Optional. A list of file attachments to include with the email.
+        /// Files larger than 3 MB are uploaded in chunks using an upload session.
+        /// Smaller files are uploaded directly as base64 content.
+        /// </param>
+        /// <param name="fromEmail">
+        /// Optional. The sender's email address. If not provided, defaults to the mailbox
+        /// address configured in <see cref="GraphMailOptionsAuth"/>.
+        /// </param>
+        /// <param name="ct">
+        /// Optional. A <see cref="CancellationToken"/> to cancel the operation.
+        /// Cancellation is checked during long-running operations such as large file uploads.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// The method performs the following steps:
+        /// 1. Creates a draft message in the sender's mailbox.
+        /// 2. Attaches files (small attachments directly, large attachments via chunked upload).
+        /// 3. Retrieves the complete message with attachments.
+        /// 4. Sends the message using the <c>sendMail</c> endpoint with <c>saveToSentItems = false</c>.
+        /// 5. Deletes the draft message after sending.
+        /// </para>
+        /// <para>
+        /// Access tokens are acquired using <see cref="ClientSecretCredential"/> before each major Graph call.
+        /// This ensures tokens are refreshed if they expire during long-running operations.
+        /// </para>
+        /// </remarks>
+        /// <exception cref="ArgumentException">
+        /// Thrown if <paramref name="toRecipients"/> is null or empty.
+        /// </exception>
+        /// <exception cref="FileNotFoundException">
+        /// Thrown if an attachment file path does not exist.
+        /// </exception>
+        /// <exception cref="GraphMailAttachmentException">
+        /// Thrown if an attachment is empty, fails to upload, or upload is incomplete.
+        /// </exception>
+        /// <exception cref="GraphMailFailedCreateMessageException">
+        /// Thrown if the draft message cannot be created.
+        /// </exception>
+        /// <exception cref="GraphMailFailedSendMessageException">
+        /// Thrown if the message cannot be sent.
+        /// </exception>
+        /// <exception cref="GraphMailFailedDeleteDraftMessageException">
+        /// Thrown if the draft message cannot be deleted after sending.
+        /// </exception>
+        /// <exception cref="AggregateException">
+        /// Thrown if multiple errors occur (e.g., send failure and draft cleanup failure).
+        /// </exception>
+        /// <exception cref="OperationCanceledException">
+        /// Thrown if the operation is canceled via <paramref name="ct"/>.
+        /// </exception>
+        /// <example>
+        /// Example usage:
+        /// <code>
+        /// var sender = new GraphMailSender(optionsAuth, httpClientFactory, logger);
+        /// await sender.SendEmailAsync(
+        ///     toRecipients: new List<string> { "user@example.com" },
+        ///     ccRecipients: null,
+        ///     bccRecipients: null,
+        ///     subject: "Quarterly Report",
+        ///     body: "<p>Please find the report attached.</p>",
+        ///     isHtml: true,
+        ///     attachments: new List<EmailAttachment>
+        ///     {
+        ///         new EmailAttachment { FileName = "report.pdf", FilePath = "C:\\Reports\\Q1.pdf" }
+        ///     });
+        /// </code>
+        /// </example>
         [SuppressMessage("Usage", "CA2219:Do not raise exceptions in finally clauses",
                         Justification = "Exception is stored and thrown after finally block completes")]
         public async Task SendEmailAsync(
@@ -410,7 +498,7 @@ namespace MailSenderLib.Services
             {
                 odataType = "#microsoft.graph.fileAttachment",
                 name = fileName,
-                contentType = contentType,
+                contentType,
                 contentBytes = base64Content
             };
 
