@@ -13,12 +13,15 @@ using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Polly;
+using Polly.Contrib.WaitAndRetry;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Mime;
@@ -40,6 +43,8 @@ namespace MailSenderLib.Services
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
         private const string HttpClientName = "GraphMailSender";
 
+        // Centralized Polly retry policy
+        private readonly AsyncPolicy<HttpResponseMessage> _retryPolicy;
 
         /// <summary>
         /// Initializes a new instance of the GraphMailSender class using IHttpClientFactory (recommended).
@@ -61,6 +66,7 @@ namespace MailSenderLib.Services
             _logger = logger;
             _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient(HttpClientName);
             _ownsHttpClient = false; // Never own HttpClient from factory
+            _retryPolicy = CreateRetryPolicy();
         }
 
         /// <summary>
@@ -83,6 +89,7 @@ namespace MailSenderLib.Services
             _logger = logger;
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
             _ownsHttpClient = false; // Don't own injected HttpClient
+            _retryPolicy = CreateRetryPolicy();
         }
 
         /// <summary>
@@ -104,6 +111,7 @@ namespace MailSenderLib.Services
             _logger = logger;
             _httpClient = new HttpClient();
             _ownsHttpClient = true; // We own this one
+            _retryPolicy = CreateRetryPolicy();
         }
 
         /// <summary> 
@@ -115,6 +123,52 @@ namespace MailSenderLib.Services
             var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
             _logger?.LogTokenAcquired(token.ExpiresOn);
             return token.Token;
+        }
+
+        private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
+        {
+            // Exponential backoff with jitter (decorrelated)
+            var delays = Backoff.DecorrelatedJitterBackoffV2(
+                medianFirstRetryDelay: TimeSpan.FromSeconds(1),
+                retryCount: 5);
+
+            return Policy<HttpResponseMessage>
+                .Handle<HttpRequestException>() // network errors
+                .Or<TaskCanceledException>()     // timeouts in .NET Standard 2.0 can surface as TaskCanceledException
+                .OrResult(r =>
+                    r.StatusCode == HttpStatusCode.RequestTimeout ||           // 408
+                    r.StatusCode == (HttpStatusCode)429 ||                     //HttpStatusCode.TooManyRequests 
+                    (int)r.StatusCode >= 500)                                  // 5xx
+                .WaitAndRetryAsync(
+                    delays,
+                    async (outcome, timespan, retryAttempt, context) =>
+                    {
+                        // Honor Retry-After header if present
+                        var result = outcome.Result;
+                        if (result != null && result.Headers?.RetryAfter?.Delta != null)
+                        {
+                            timespan = result.Headers.RetryAfter.Delta.Value;
+                        }
+
+                        // Optional: log response body for diagnostics on first few retries
+                        string? reason = null;
+                        try
+                        {
+                            if (result != null && result.Content != null)
+                            {
+                                reason = await result.Content.ReadAsStringAsync().ConfigureAwait(false);
+                                if (!string.IsNullOrEmpty(reason) && reason.Length > 500) reason = reason.Substring(0, 500) + "...";
+                            }
+                        }
+                        catch { /* swallow logging-only exceptions */ }
+
+                        _logger?.LogWarning($"Retrying Graph API call. Attempt {retryAttempt}, waiting {timespan.TotalSeconds:F1}s. Status: {result?.StatusCode}. Reason: {reason}");
+                    });
+        }
+
+        private Task<HttpResponseMessage> SendWithRetryAsync(Func<Task<HttpResponseMessage>> sendFunc)
+        {
+            return _retryPolicy.ExecuteAsync(sendFunc);
         }
 
         /// <summary>
@@ -280,7 +334,8 @@ namespace MailSenderLib.Services
                     ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
                 });
 
-                var messageResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, messageUrl, messageJson, token, ct);
+                var messageResponse = await SendWithRetryAsync(() =>
+                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, messageUrl, messageJson, token, ct));
 
                 if (!messageResponse.IsSuccessStatusCode)
                 {
@@ -331,7 +386,8 @@ namespace MailSenderLib.Services
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}?$expand=attachments";
                 // Fetch token on demand (again)
                 token = await GetAccessTokenAsync(ct);
-                var getResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct);
+                var getResponse = await SendWithRetryAsync(() =>
+                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct));
                 getResponse.EnsureSuccessStatusCode();
 
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -352,7 +408,8 @@ namespace MailSenderLib.Services
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
 
                 token = await GetAccessTokenAsync(ct);
-                var sendResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct);
+                var sendResponse = await SendWithRetryAsync(() =>
+                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct));
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
@@ -379,7 +436,8 @@ namespace MailSenderLib.Services
                     {
                         var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}";
                         var tokenForDelete = await GetAccessTokenAsync(ct);
-                        var deleteResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, tokenForDelete, ct);
+                        var deleteResponse = await SendWithRetryAsync(() =>
+                            _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, tokenForDelete, ct));
 
                         if (!deleteResponse.IsSuccessStatusCode)
                         {
@@ -508,7 +566,8 @@ namespace MailSenderLib.Services
             });
 
             var token = await GetAccessTokenAsync(ct);
-            var response = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, attachUrl, json, token, ct);
+            var response = await SendWithRetryAsync(() =>
+                _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, attachUrl, json, token, ct));
             response.EnsureSuccessStatusCode();
 
             _logger?.LogSmallAttachmentAdded(fileName);
@@ -536,7 +595,8 @@ namespace MailSenderLib.Services
             var sessionJson = JsonConvert.SerializeObject(sessionData);
 
             var token = await GetAccessTokenAsync(ct);
-            var sessionResponse = await _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct);
+            var sessionResponse = await SendWithRetryAsync(() =>
+                _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct));
 
             if (!sessionResponse.IsSuccessStatusCode)
             {
@@ -588,7 +648,7 @@ namespace MailSenderLib.Services
                         request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
 
                         // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
-                        var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
+                        var response = await SendWithRetryAsync(() => _httpClient.SendAsync(request, ct));
 
                         if (!response.IsSuccessStatusCode)
                         {
