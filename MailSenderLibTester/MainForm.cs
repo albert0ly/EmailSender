@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Configuration;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -37,6 +38,8 @@ namespace MailSenderLibTester
         private PictureBox _pbPreview;
         private Label _lblRecvStatus;
         private readonly ILogger<GraphMailSender> _logger;
+
+        private GraphMailSender mailService = null;
 
         public MainForm()
         {
@@ -342,6 +345,7 @@ namespace MailSenderLibTester
 
         private async void btnSend2_Click(object sender, EventArgs e)
         {
+            Stopwatch stopwatch = new Stopwatch();
             btnSend2.Enabled = false;
             lblStatus.Text = "Sending...";
             try
@@ -375,8 +379,11 @@ namespace MailSenderLibTester
                         FilePath = a
                     }).ToList();
 
+                    
+                    stopwatch.Start();
 
-                    var mailService = new GraphMailSender(optionsAuth, _logger);
+                    if (mailService == null)
+                        mailService = new GraphMailSender(optionsAuth, _logger);
 
 
                     await mailService.SendEmailAsync(
@@ -389,12 +396,14 @@ namespace MailSenderLibTester
                         attachments: attachments,
                         fromEmail: optionsAuth.MailboxAddress
                     );
+
+                    stopwatch.Stop();
                 }
                 finally
                 {
 
                 }
-                lblStatus.Text = "Sent";
+                lblStatus.Text = $"Sent. Execution Time: {stopwatch.ElapsedMilliseconds} ms";
             }
             catch (Exception ex)
             {

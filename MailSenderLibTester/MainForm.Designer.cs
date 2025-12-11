@@ -264,7 +264,7 @@ namespace MailSenderLibTester
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(695, 609);
+            this.ClientSize = new System.Drawing.Size(695, 699);
             this.Controls.Add(this.btnSend2);
             this.Controls.Add(this.checkSaveInSent);
             this.Controls.Add(this.lblStatus);
