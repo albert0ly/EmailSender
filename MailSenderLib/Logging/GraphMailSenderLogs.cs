@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
+using System.Net;
 
 namespace MailSenderLib.Logging
 {
@@ -68,9 +69,13 @@ namespace MailSenderLib.Logging
             LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1011, nameof(ResponseBodyTrace)), "{Body}");
 
         internal static readonly Action<ILogger, string, long, long, Exception?> UploadCancelled =
-            LoggerMessage.Define<string, long, long>(LogLevel.Error, new EventId(1023, nameof(ResponseBodyTrace)),
+            LoggerMessage.Define<string, long, long>(LogLevel.Error, new EventId(1023, nameof(UploadCancelled)),
                 "Upload of '{FileName}' was cancelled at offset {Offset}/{FileSize}");
-        
+
+        internal static readonly Action<ILogger, int, TimeSpan, HttpStatusCode, string, Exception?> Retrying =
+            LoggerMessage.Define<int, TimeSpan, HttpStatusCode, string>(LogLevel.Warning, new EventId(1024, nameof(Retrying)),
+        "Retrying Graph API call. Attempt {RetryAttempt}, waiting {TimeSpan.TotalSeconds:F1}s. Status: {StatusCode}. Reason: {Reason}");
+
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -125,6 +130,9 @@ namespace MailSenderLib.Logging
 
         public static void LogUploadCancelled(this ILogger logger, string fileName, long offset, long fileSize, Exception? ex=null) =>
             GraphMailSenderLogs.UploadCancelled(logger, fileName, offset, fileSize, ex);
+
+        public static void LogRetrying(this ILogger logger, int retryAttempt, TimeSpan timeSpan, HttpStatusCode statusCode, string reason, Exception? ex = null) =>
+            GraphMailSenderLogs.Retrying(logger, retryAttempt, timeSpan, statusCode, reason, ex);
 
     }
 }
