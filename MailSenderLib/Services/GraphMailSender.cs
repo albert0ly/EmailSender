@@ -18,6 +18,7 @@ using Polly.Contrib.WaitAndRetry;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
@@ -286,7 +287,8 @@ namespace MailSenderLib.Services
             Exception? originalException = null;
             string token = string.Empty;
             string userEncoded = string.Empty;
-
+            var sw = Stopwatch.StartNew();
+            
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
@@ -302,8 +304,9 @@ namespace MailSenderLib.Services
 
                 // Fetch token on demand
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+                
+                _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
 
-                // Step 1: Create draft message using Newtonsoft.Json serialization
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
 
                 var message = new MessagePayload
@@ -360,7 +363,7 @@ namespace MailSenderLib.Services
                 _logger?.LogDraftCreated(messageId);
                 draftCreated = true;
 
-                // Step 2: Attach files (stream large files, direct upload small files)
+                _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
                 if (attachments != null && attachments.Count > 0)
                 {
                     foreach (var attachment in attachments)
@@ -389,22 +392,22 @@ namespace MailSenderLib.Services
                         }
                     }
                 }
-
-                // Step 3: Get the complete message with attachments
+                
+                _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
                 // Fetch token on demand (again)
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                 var getResponse = await SendWithRetryAsync(() =>
                     _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct)).ConfigureAwait(false);
                 getResponse.EnsureSuccessStatusCode();
-
+                
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var completeMessage = JObject.Parse(completeMessageBody);
 
                 // Remove metadata and read-only fields
                 var cleanMessage = CleanMessageForSending(completeMessage);
 
-                // Step 4: Send using sendMail endpoint with SaveToSentItems = false
+                _logger?.LogExecutionStep("Step 4: Send using sendMail endpoint", sw.ElapsedMilliseconds);
                 var sendUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/sendMail";
 
                 var sendPayload = new
@@ -412,7 +415,6 @@ namespace MailSenderLib.Services
                     message = cleanMessage,
                     saveToSentItems = false
                 };
-
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
 
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
@@ -436,8 +438,8 @@ namespace MailSenderLib.Services
                 // Don't throw yet - we'll handle it in finally after cleanup attempt
             }
             finally
-            {
-                // Step 5: Delete the draft message if it was created
+            {                
+                _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
                 if (draftCreated && !string.IsNullOrEmpty(messageId))
                 {
                     try

@@ -74,8 +74,11 @@ namespace MailSenderLib.Logging
 
         internal static readonly Action<ILogger, int, TimeSpan, HttpStatusCode, string, Exception?> Retrying =
             LoggerMessage.Define<int, TimeSpan, HttpStatusCode, string>(LogLevel.Warning, new EventId(1024, nameof(Retrying)),
-        "Retrying Graph API call. Attempt {RetryAttempt}, waiting {TimeSpan.TotalSeconds:F1}s. Status: {StatusCode}. Reason: {Reason}");
+                "Retrying Graph API call. Attempt {RetryAttempt}, waiting {TimeSpan.TotalSeconds:F1}s. Status: {StatusCode}. Reason: {Reason}");
 
+        internal static readonly Action<ILogger, long, string, Exception?> ExecutionStep =
+            LoggerMessage.Define<long, string>(LogLevel.Information, new EventId(1025, nameof(ExecutionStep)),
+                "ExecutionStep: Elapsed: {ElapsedTime} ms. {Description}");
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -133,6 +136,10 @@ namespace MailSenderLib.Logging
 
         public static void LogRetrying(this ILogger logger, int retryAttempt, TimeSpan timeSpan, HttpStatusCode statusCode, string reason, Exception? ex = null) =>
             GraphMailSenderLogs.Retrying(logger, retryAttempt, timeSpan, statusCode, reason, ex);
+
+        public static void LogExecutionStep(this ILogger logger, string description, long elapsedTime) =>
+            GraphMailSenderLogs.ExecutionStep(logger, elapsedTime, description, null);
+
 
     }
 }
