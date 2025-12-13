@@ -77,7 +77,7 @@ namespace MailSenderLibTester
             // Move existing top-level controls into Send tab. We assume designer created these controls with known names.
             var sendControlNames = new[] {
                 "txtTenant", "lblTenant", "txtClientId","txtClientSecret", "lblClientSecret", "lblClientId", "txtMailbox",
-                "txtTo","txtCc","txtBcc","txtSubject","txtBody",
+                "txtTo","txtCc","txtBcc","txtSubject","txtBody", "btnDeleteAttachments",
                 "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "btnSend2", "checkSaveInSent","lblMailbox",
                 "lblTo","lblCc","lblBcc","lblSubject","lblBody"
             };
@@ -386,7 +386,7 @@ namespace MailSenderLibTester
                         mailService = new GraphMailSender(optionsAuth, _logger);
 
 
-                    await mailService.SendEmailAsync(
+                    mailService.SendEmailAsync(
                         toRecipients: to,
                         ccRecipients: cc,
                         bccRecipients: bcc,
@@ -398,6 +398,7 @@ namespace MailSenderLibTester
                     );
 
                     stopwatch.Stop();
+           
                 }
                 finally
                 {
@@ -413,6 +414,11 @@ namespace MailSenderLibTester
             {
                 btnSend2.Enabled = true;
             }
+        }
+
+        private void btnDeleteAttachments_Click(object sender, EventArgs e)
+        {
+            lstAttachments.Items.Clear();
         }
     }
 }

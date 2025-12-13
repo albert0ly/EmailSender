@@ -42,6 +42,7 @@ namespace MailSenderLibTester
             this.lblStatus = new System.Windows.Forms.Label();
             this.checkSaveInSent = new System.Windows.Forms.CheckBox();
             this.btnSend2 = new System.Windows.Forms.Button();
+            this.btnDeleteAttachments = new System.Windows.Forms.Button();
             this.SuspendLayout();
             // 
             // lblTenant
@@ -260,11 +261,22 @@ namespace MailSenderLibTester
             this.btnSend2.UseVisualStyleBackColor = true;
             this.btnSend2.Click += new System.EventHandler(this.btnSend2_Click);
             // 
+            // btnDeleteAttachments
+            // 
+            this.btnDeleteAttachments.Location = new System.Drawing.Point(130, 509);
+            this.btnDeleteAttachments.Name = "btnDeleteAttachments";
+            this.btnDeleteAttachments.Size = new System.Drawing.Size(120, 23);
+            this.btnDeleteAttachments.TabIndex = 27;
+            this.btnDeleteAttachments.Text = "Delete Attachments";
+            this.btnDeleteAttachments.UseVisualStyleBackColor = true;
+            this.btnDeleteAttachments.Click += new System.EventHandler(this.btnDeleteAttachments_Click);
+            // 
             // MainForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(695, 699);
+            this.Controls.Add(this.btnDeleteAttachments);
             this.Controls.Add(this.btnSend2);
             this.Controls.Add(this.checkSaveInSent);
             this.Controls.Add(this.lblStatus);
@@ -324,5 +336,6 @@ namespace MailSenderLibTester
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.CheckBox checkSaveInSent;
         private System.Windows.Forms.Button btnSend2;
+        private System.Windows.Forms.Button btnDeleteAttachments;
     }
 }
