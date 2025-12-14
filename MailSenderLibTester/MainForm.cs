@@ -419,6 +419,7 @@ namespace MailSenderLibTester
         private void btnDeleteAttachments_Click(object sender, EventArgs e)
         {
             lstAttachments.Items.Clear();
+            _attachmentPaths.Clear();
         }
     }
 }
