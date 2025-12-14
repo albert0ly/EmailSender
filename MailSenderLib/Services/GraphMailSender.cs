@@ -32,10 +32,32 @@ using System.Threading.Tasks;
 
 namespace MailSenderLib.Services
 {
+    /// <summary>
+    /// ArrayPool wrapper for Newtonsoft.Json to reduce memory allocations during JSON parsing
+    /// </summary>
+    internal sealed class JsonArrayPool : IArrayPool<char>
+    {
+        public static readonly JsonArrayPool Instance = new JsonArrayPool();
+
+        public char[] Rent(int minimumLength)
+        {
+            return ArrayPool<char>.Shared.Rent(minimumLength);
+        }
+
+        public void Return(char[]? array)
+        {
+            if (array != null)
+            {
+                ArrayPool<char>.Shared.Return(array);
+            }
+        }
+    }
+
     public class GraphMailSender : IDisposable, IGraphMailSender
     {
         private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
         private const int ChunkSize = 5 * 1024 * 1024; // 5MB
+        private const long MaxTotalAttachmentSize = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
         private readonly GraphMailOptionsAuth _optionsAuth;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
@@ -128,7 +150,7 @@ namespace MailSenderLib.Services
         }
 
         private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
-        {            
+        {
             // Exponential backoff with jitter (decorrelated)
             var delays = Backoff.DecorrelatedJitterBackoffV2(
                 medianFirstRetryDelay: TimeSpan.FromSeconds(1),
@@ -151,7 +173,7 @@ namespace MailSenderLib.Services
                         {
                             timespan = result.Headers.RetryAfter.Delta.Value;
                         }
-                        
+
                         Exception? contentReadException = null;
                         string? reason = null;
                         try
@@ -163,13 +185,13 @@ namespace MailSenderLib.Services
                                 if (!string.IsNullOrEmpty(reason) && reason.Length > 500) reason = reason.Substring(0, 500) + "...";
                             }
                         }
-                        catch(Exception ex)
+                        catch (Exception ex)
                         {
                             contentReadException = ex;
                         }
 
                         _logger?.LogRetrying(retryAttempt, timespan, result?.StatusCode ?? 0, reason ?? "Unknown", contentReadException);
-                        
+
                     });
         }
 
@@ -288,7 +310,7 @@ namespace MailSenderLib.Services
             string token = string.Empty;
             string userEncoded = string.Empty;
             var sw = Stopwatch.StartNew();
-            
+
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
@@ -304,7 +326,7 @@ namespace MailSenderLib.Services
 
                 // Fetch token on demand
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                
+
                 _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
 
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
@@ -366,6 +388,8 @@ namespace MailSenderLib.Services
                 _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
                 if (attachments != null && attachments.Count > 0)
                 {
+                    // Validate total attachment size to prevent memory issues
+                    long totalSize = 0;
                     foreach (var attachment in attachments)
                     {
                         if (!File.Exists(attachment.FilePath))
@@ -378,6 +402,20 @@ namespace MailSenderLib.Services
                         {
                             throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
                         }
+
+                        totalSize += fileInfo.Length;
+                    }
+
+                    if (totalSize > MaxTotalAttachmentSize)
+                    {
+                        throw new GraphMailAttachmentException(
+                            $"Total attachment size ({totalSize / 1024 / 1024}MB) exceeds limit ({MaxTotalAttachmentSize / 1024 / 1024}MB). " +
+                            $"This protects against memory issues when retrieving the message with attachments.");
+                    }
+
+                    foreach (var attachment in attachments)
+                    {
+                        var fileInfo = new FileInfo(attachment.FilePath);
                         var fileSize = fileInfo.Length;
                         var contentType = GetMimeType(attachment.FileName);
 
@@ -392,7 +430,7 @@ namespace MailSenderLib.Services
                         }
                     }
                 }
-                
+
                 _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
                 // Fetch token on demand (again)
@@ -400,9 +438,22 @@ namespace MailSenderLib.Services
                 var getResponse = await SendWithRetryAsync(() =>
                     _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct)).ConfigureAwait(false);
                 getResponse.EnsureSuccessStatusCode();
-                
-                var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var completeMessage = JObject.Parse(completeMessageBody);
+
+                // Stream the JSON response directly to avoid loading entire response into memory
+                // This is critical for large attachments with base64-encoded contentBytes
+                JObject completeMessage;
+                using (var stream = await getResponse.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192))
+                using (var jsonReader = new JsonTextReader(streamReader)
+                {
+                    // Use ArrayPool to reduce memory allocations during JSON parsing
+                    ArrayPool = JsonArrayPool.Instance
+                })
+                {
+                    var serializer = new JsonSerializer();
+                    completeMessage = serializer.Deserialize<JObject>(jsonReader)
+                        ?? throw new GraphMailFailedCreateMessageException("Failed to parse message response");
+                }
 
                 // Remove metadata and read-only fields
                 var cleanMessage = CleanMessageForSending(completeMessage);
@@ -415,17 +466,40 @@ namespace MailSenderLib.Services
                     message = cleanMessage,
                     saveToSentItems = false
                 };
-                var sendJson = JsonConvert.SerializeObject(sendPayload);
 
+                // Stream the serialization instead of creating a huge string
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                var sendResponse = await SendWithRetryAsync(() =>
-                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct)).ConfigureAwait(false);
 
-                if (!sendResponse.IsSuccessStatusCode)
+                using (var memoryStream = new MemoryStream())
+                using (var streamWriter = new StreamWriter(memoryStream, Encoding.UTF8, bufferSize: 8192, leaveOpen: true))
+                using (var jsonWriter = new JsonTextWriter(streamWriter))
                 {
-                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                    _logger?.LogFailedToSendMessage(error);
-                    throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
+                    var serializer = new JsonSerializer();
+                    serializer.Serialize(jsonWriter, sendPayload);
+                    await jsonWriter.FlushAsync(ct).ConfigureAwait(false);
+                    await streamWriter.FlushAsync().ConfigureAwait(false);
+
+                    memoryStream.Position = 0;
+
+                    using (var content = new StreamContent(memoryStream, bufferSize: 8192))
+                    {
+                        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+                        using (var request = new HttpRequestMessage(HttpMethod.Post, sendUrl))
+                        {
+                            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                            request.Content = content;
+
+                            var sendResponse = await SendWithRetryAsync(() => _httpClient.SendAsync(request, ct)).ConfigureAwait(false);
+
+                            if (!sendResponse.IsSuccessStatusCode)
+                            {
+                                var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
+                                _logger?.LogFailedToSendMessage(error);
+                                throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
+                            }
+                        }
+                    }
                 }
 
                 _logger?.LogMessageSent(messageId);
@@ -438,7 +512,7 @@ namespace MailSenderLib.Services
                 // Don't throw yet - we'll handle it in finally after cleanup attempt
             }
             finally
-            {                
+            {
                 _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
                 if (draftCreated && !string.IsNullOrEmpty(messageId))
                 {
@@ -718,6 +792,7 @@ namespace MailSenderLib.Services
                 ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+
         private static string GetMimeType(string fileName)
         {
             return _provider.TryGetContentType(fileName, out var contentType)
