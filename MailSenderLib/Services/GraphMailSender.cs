@@ -127,51 +127,67 @@ namespace MailSenderLib.Services
             return token.Token;
         }
 
+        private Task<HttpResponseMessage> SendWithRetryAsync(
+                        Func<HttpRequestMessage> requestFactory,
+                        CancellationToken ct)
+        {
+            return _retryPolicy.ExecuteAsync(async () =>
+            {
+                using (var request = requestFactory())
+                {
+                    return await _httpClient
+                        .SendAsync(request, ct)
+                        .ConfigureAwait(false);
+                }
+            });
+        }
         private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
-        {            
-            // Exponential backoff with jitter (decorrelated)
-            var delays = Backoff.DecorrelatedJitterBackoffV2(
-                medianFirstRetryDelay: TimeSpan.FromSeconds(1),
-                retryCount: 5);
-
+        {
             return Policy<HttpResponseMessage>
-                .Handle<HttpRequestException>() // network errors
-                .Or<TaskCanceledException>()     // timeouts in .NET Standard 2.0 can surface as TaskCanceledException
+                .Handle<HttpRequestException>()
+                .Or<TaskCanceledException>()
                 .OrResult(r =>
-                    r.StatusCode == HttpStatusCode.RequestTimeout ||           // 408
-                    r.StatusCode == (HttpStatusCode)429 ||                     //HttpStatusCode.TooManyRequests 
-                    (int)r.StatusCode >= 500)                                  // 5xx
+                    r.StatusCode == HttpStatusCode.RequestTimeout ||
+                    r.StatusCode == (HttpStatusCode)429 ||
+                    (int)r.StatusCode >= 500)
                 .WaitAndRetryAsync(
-                    delays,
-                    async (outcome, timespan, retryAttempt, context) =>
+                    retryCount: 5,
+                    sleepDurationProvider: (retryAttempt, outcome, context) =>
                     {
-                        // Honor Retry-After header if present
-                        var result = outcome.Result;
-                        if (result != null && result.Headers?.RetryAfter?.Delta != null)
+                        // HONOR Retry-After (this is the important part)
+                        var response = outcome.Result;
+                        if (response?.Headers?.RetryAfter?.Delta != null)
                         {
-                            timespan = result.Headers.RetryAfter.Delta.Value;
+                            return response.Headers.RetryAfter.Delta.Value;
                         }
-                        
+
+                        // fallback exponential backoff
+                        return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt));
+                    },
+                    onRetryAsync: async (outcome, delay, retryAttempt, context) =>
+                    {
                         Exception? contentReadException = null;
-                        string? reason = null;
+                        string? body = null;
                         try
                         {
-                            contentReadException = null;
-                            if (result != null && result.Content != null)
-                            {
-                                reason = await result.Content.ReadAsStringAsync().ConfigureAwait(false);
-                                if (!string.IsNullOrEmpty(reason) && reason.Length > 500) reason = reason.Substring(0, 500) + "...";
-                            }
+                            body = outcome.Result?.Content != null
+                                ? await outcome.Result.Content.ReadAsStringAsync().ConfigureAwait(false)
+                                : null;
                         }
-                        catch(Exception ex)
+                        catch (Exception ex)
                         {
                             contentReadException = ex;
                         }
 
-                        _logger?.LogRetrying(retryAttempt, timespan, result?.StatusCode ?? 0, reason ?? "Unknown", contentReadException);
-                        
+                        _logger?.LogRetrying(
+                            retryAttempt,
+                            delay,
+                            outcome.Result?.StatusCode ?? 0,
+                            body ?? "No response body",
+                            contentReadException);
                     });
         }
+
 
         private Task<HttpResponseMessage> SendWithRetryAsync(Func<Task<HttpResponseMessage>> sendFunc)
         {
@@ -288,7 +304,7 @@ namespace MailSenderLib.Services
             string token = string.Empty;
             string userEncoded = string.Empty;
             var sw = Stopwatch.StartNew();
-            
+
             try
             {
                 if (toRecipients == null || !(toRecipients.Count > 0))
@@ -304,7 +320,7 @@ namespace MailSenderLib.Services
 
                 // Fetch token on demand
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                
+
                 _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
 
                 var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
@@ -312,32 +328,24 @@ namespace MailSenderLib.Services
                 var message = new MessagePayload
                 {
                     Subject = subject,
-                    Body = new BodyPayload
-                    {
-                        ContentType = isHtml ? "HTML" : "Text",
-                        Content = body
-                    },
+                    Body = new BodyPayload { ContentType = isHtml ? "HTML" : "Text", Content = body },
                     ToRecipients = toRecipients.Select(email => new RecipientPayload
                     {
                         EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList()
                 };
 
-                if (ccRecipients != null && ccRecipients.Count > 0)
-                {
+                if (ccRecipients?.Count > 0)
                     message.CcRecipients = ccRecipients.Select(email => new RecipientPayload
                     {
                         EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList();
-                }
 
-                if (bccRecipients != null && bccRecipients.Count > 0)
-                {
+                if (bccRecipients?.Count > 0)
                     message.BccRecipients = bccRecipients.Select(email => new RecipientPayload
                     {
                         EmailAddress = new EmailAddressPayload { Address = email }
                     }).ToList();
-                }
 
                 var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
                 {
@@ -345,8 +353,14 @@ namespace MailSenderLib.Services
                     ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
                 });
 
+                // Create draft
                 var messageResponse = await SendWithRetryAsync(() =>
-                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, messageUrl, messageJson, token, ct)).ConfigureAwait(false);
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Post, messageUrl);
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    req.Content = new StringContent(messageJson, Encoding.UTF8, "application/json");
+                    return req;
+                }, ct).ConfigureAwait(false);
 
                 if (!messageResponse.IsSuccessStatusCode)
                 {
@@ -363,63 +377,63 @@ namespace MailSenderLib.Services
                 _logger?.LogDraftCreated(messageId);
                 draftCreated = true;
 
+                // Attach files
                 _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
-                if (attachments != null && attachments.Count > 0)
+                if (attachments?.Count > 0)
                 {
                     foreach (var attachment in attachments)
                     {
                         if (!File.Exists(attachment.FilePath))
-                        {
                             throw new FileNotFoundException($"Attachment file not found: {attachment.FilePath}", attachment.FilePath);
-                        }
 
                         var fileInfo = new FileInfo(attachment.FilePath);
                         if (fileInfo.Length == 0)
-                        {
                             throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
-                        }
+
                         var fileSize = fileInfo.Length;
                         var contentType = GetMimeType(attachment.FileName);
 
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
+
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
-                        {
                             await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
-                        }
                         else
-                        {
                             await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
-                        }
                     }
                 }
-                
+
+                // Get full message with attachments
                 _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
                 var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
-                // Fetch token on demand (again)
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                 var getResponse = await SendWithRetryAsync(() =>
-                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Get, getMessageUrl, null, token, ct)).ConfigureAwait(false);
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Get, getMessageUrl);
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    return req;
+                }, ct).ConfigureAwait(false);
                 getResponse.EnsureSuccessStatusCode();
-                
+
                 var completeMessageBody = await getResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var completeMessage = JObject.Parse(completeMessageBody);
 
-                // Remove metadata and read-only fields
+                // Remove read-only fields
                 var cleanMessage = CleanMessageForSending(completeMessage);
 
+                // Send mail
                 _logger?.LogExecutionStep("Step 4: Send using sendMail endpoint", sw.ElapsedMilliseconds);
                 var sendUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/sendMail";
-
-                var sendPayload = new
-                {
-                    message = cleanMessage,
-                    saveToSentItems = false
-                };
+                var sendPayload = new { message = cleanMessage, saveToSentItems = false };
                 var sendJson = JsonConvert.SerializeObject(sendPayload);
-
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+
                 var sendResponse = await SendWithRetryAsync(() =>
-                    _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sendUrl, sendJson, token, ct)).ConfigureAwait(false);
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
+                    return req;
+                }, ct).ConfigureAwait(false);
 
                 if (!sendResponse.IsSuccessStatusCode)
                 {
@@ -434,11 +448,9 @@ namespace MailSenderLib.Services
             {
                 originalException = ex;
                 _logger?.LogFailedToSendMessage("", ex);
-
-                // Don't throw yet - we'll handle it in finally after cleanup attempt
             }
             finally
-            {                
+            {
                 _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
                 if (draftCreated && !string.IsNullOrEmpty(messageId))
                 {
@@ -447,55 +459,40 @@ namespace MailSenderLib.Services
                         var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}";
                         var tokenForDelete = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                         var deleteResponse = await SendWithRetryAsync(() =>
-                            _httpClient.SendJsonWithTokenAsync(HttpMethod.Delete, deleteUrl, null, tokenForDelete, ct)).ConfigureAwait(false);
+                        {
+                            var req = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
+                            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenForDelete);
+                            return req;
+                        }, ct).ConfigureAwait(false);
 
                         if (!deleteResponse.IsSuccessStatusCode)
                         {
                             var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
                             _logger?.LogFailedToDeleteDraft(messageId, error);
-
                             var cleanupEx = new GraphMailFailedDeleteDraftMessageException($"Failed to delete draft message {messageId}, Error {error}");
-
                             if (originalException != null)
                             {
-                                // Combine both exceptions
-                                originalException = new AggregateException(
-                                    "Email operation failed with multiple errors",
-                                    originalException,
-                                    cleanupEx);
+                                originalException = new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx);
                             }
                             else
                             {
-                                // This is the only error
                                 originalException = cleanupEx;
                             }
                         }
                     }
                     catch (Exception cleanupEx)
                     {
-                        if (originalException != null)
-                        {
-                            // Combine both exceptions
-                            originalException = new AggregateException(
-                                "Email operation failed with multiple errors",
-                                originalException,
-                                cleanupEx);
-                        }
-                        else
-                        {
-                            // This is the only error
-                            originalException = cleanupEx;
-                        }
+                        originalException = originalException != null
+                            ? new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx)
+                            : cleanupEx;
                     }
                 }
 
-                // Now throw if there was any exception
                 if (originalException != null)
-                {
                     throw originalException;
-                }
             }
         }
+
 
         private static JObject CleanMessageForSending(JObject completeMessage)
         {
@@ -553,12 +550,8 @@ namespace MailSenderLib.Services
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
             string fileName, string filePath, string contentType, CancellationToken ct)
         {
-            // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
-
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
-
-            // Read file and encode to base64
             var fileBytes = await filePath.ReadAllBytesAsync(ct).ConfigureAwait(false);
             var base64Content = Convert.ToBase64String(fileBytes);
 
@@ -577,147 +570,83 @@ namespace MailSenderLib.Services
 
             var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
             var response = await SendWithRetryAsync(() =>
-                _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, attachUrl, json, token, ct)).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, attachUrl);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                req.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                return req;
+            }, ct).ConfigureAwait(false);
 
+            response.EnsureSuccessStatusCode();
             _logger?.LogSmallAttachmentAdded(fileName);
         }
 
-        private async Task UploadLargeAttachmentStreamAsync(string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize, string contentType, CancellationToken ct)
+
+        private async Task UploadLargeAttachmentStreamAsync(
+            string fromEmail, string messageId,
+            string fileName, string filePath, long fileSize, string contentType,
+            CancellationToken ct)
         {
-            // Do NOT sanitize filePath anymore
             fileName = fileName.SanitizeFilename();
 
-            // Create upload session
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
-
             var sessionData = new
             {
-                AttachmentItem = new
-                {
-                    attachmentType = "file",
-                    name = fileName,
-                    size = fileSize
-                }
+                AttachmentItem = new { attachmentType = "file", name = fileName, size = fileSize }
             };
-
             var sessionJson = JsonConvert.SerializeObject(sessionData);
-
             var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+
             var sessionResponse = await SendWithRetryAsync(() =>
-                _httpClient.SendJsonWithTokenAsync(HttpMethod.Post, sessionUrl, sessionJson, token, ct)).ConfigureAwait(false);
-
-            if (!sessionResponse.IsSuccessStatusCode)
             {
-                var errorBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                _logger?.LogChunkFailed((int)sessionResponse.StatusCode, sessionResponse.ReasonPhrase ?? "", errorBody);
-                throw new GraphMailAttachmentException($"Failed to create upload session: {(int)sessionResponse.StatusCode} {sessionResponse.ReasonPhrase} - {errorBody}");
-            }
+                var req = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                req.Content = new StringContent(sessionJson, Encoding.UTF8, "application/json");
+                return req;
+            }, ct).ConfigureAwait(false);
 
-            var sessionResponseBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var sessionInfo = JObject.Parse(sessionResponseBody);
-            var uploadUrl = sessionInfo["uploadUrl"]?.ToString()
-                ?? throw new GraphMailAttachmentException("uploadUrl not found in response");
+            sessionResponse.EnsureSuccessStatusCode();
+            var sessionBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
+                ?? throw new GraphMailAttachmentException("uploadUrl not found");
 
-            _logger?.LogUploadSessionUrl(uploadUrl, fileName);
-
-            // Upload in chunks using streaming (5MB chunks)
             var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
             long offset = 0;
 
             try
             {
-                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
+                while (offset < fileSize)
                 {
-                    while (offset < fileSize)
+                    ct.ThrowIfCancellationRequested();
+                    int bytesRead = await fs.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct);
+                    if (bytesRead <= 0) throw new GraphMailAttachmentException("Unexpected EOF");
+
+                    long end = offset + bytesRead - 1;
+                    var response = await SendWithRetryAsync(() =>
                     {
-                        // Check cancellation before each chunk
-                        ct.ThrowIfCancellationRequested();
+                        var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl);
+                        var content = new ByteArrayContent(buffer, 0, bytesRead);
+                        req.Content = content;
+                        req.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+                        req.Content.Headers.ContentLength = bytesRead;
+                        req.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+                        return req;
+                    }, ct).ConfigureAwait(false);
 
-                        int bytesRead = await fileStream.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct).ConfigureAwait(false);
-
-                        // FIXED: Validate that we read the expected number of bytes
-                        if (bytesRead <= 0)
-                        {
-                            throw new GraphMailAttachmentException(
-                                $"Unexpected end of file while uploading '{fileName}'. " +
-                                $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
-                                $"File size: {fileSize}, bytes uploaded: {offset}");
-                        }
-
-                        long end = offset + bytesRead - 1;
-
-                        using (var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl))
-                        using (var content = new ByteArrayContent(buffer, 0, bytesRead))
-                        {
-                            request.Content = content;
-                            request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-                            request.Content.Headers.ContentLength = bytesRead;
-                            request.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
-
-                            // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
-                            var response = await SendWithRetryAsync(() => _httpClient.SendAsync(request, ct)).ConfigureAwait(false);
-
-                            if (!response.IsSuccessStatusCode)
-                            {
-                                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                                _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
-                                throw new GraphMailAttachmentException(
-                                    $"Chunk upload failed for '{fileName}' at offset {offset}: " +
-                                    $"{(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
-                            }
-
-                            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-                            // Update offset
-                            offset = end + 1;
-                            _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
-
-                            // Check if there are more chunks to upload by looking at nextExpectedRanges
-                            if (!string.IsNullOrWhiteSpace(responseBody))
-                            {
-                                var responseJson = JObject.Parse(responseBody);
-                                if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
-                                {
-                                    // There are more chunks expected, continue uploading
-                                    _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
-                                    continue;
-                                }
-                            }
-
-                            // No nextExpectedRanges means upload is complete
-                            break;
-                        }
-                    }
-
-                    // FIXED: Final validation that we uploaded the complete file
-                    if (offset != fileSize)
-                    {
-                        throw new GraphMailAttachmentException(
-                            $"Incomplete file upload for '{fileName}'. " +
-                            $"Expected to upload {fileSize} bytes but only uploaded {offset} bytes. " +
-                            $"The file may have been truncated or modified during upload.");
-                    }
-
-                    _logger?.LogUploadComplete(fileName);
+                    response.EnsureSuccessStatusCode();
+                    offset = end + 1;
                 }
-            }
-            catch (OperationCanceledException ex)
-            {
-                _logger?.LogUploadCancelled(fileName, offset, fileSize, ex);
-                throw;
-            }
-            catch (IOException ex)
-            {
-                throw new GraphMailAttachmentException(
-                    $"IO error while reading file '{fileName}' at offset {offset}: {ex.Message}", ex);
+
+                if (offset != fileSize) throw new GraphMailAttachmentException("Upload incomplete");
+                _logger?.LogUploadComplete(fileName);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+
         private static string GetMimeType(string fileName)
         {
             return _provider.TryGetContentType(fileName, out var contentType)
@@ -745,7 +674,7 @@ namespace MailSenderLib.Services
             {
                 _httpClient?.Dispose();
             }
-            (_credential as IDisposable)?.Dispose();
+           
             GC.SuppressFinalize(this);
         }
     }
