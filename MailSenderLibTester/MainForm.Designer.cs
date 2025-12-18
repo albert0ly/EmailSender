@@ -43,6 +43,7 @@ namespace MailSenderLibTester
             this.checkSaveInSent = new System.Windows.Forms.CheckBox();
             this.btnSend2 = new System.Windows.Forms.Button();
             this.btnDeleteAttachments = new System.Windows.Forms.Button();
+            this.lblCount = new System.Windows.Forms.Label();
             this.SuspendLayout();
             // 
             // lblTenant
@@ -216,9 +217,9 @@ namespace MailSenderLibTester
             // 
             // btnAddAttachment
             // 
-            this.btnAddAttachment.Location = new System.Drawing.Point(130, 480);
+            this.btnAddAttachment.Location = new System.Drawing.Point(179, 485);
             this.btnAddAttachment.Name = "btnAddAttachment";
-            this.btnAddAttachment.Size = new System.Drawing.Size(120, 23);
+            this.btnAddAttachment.Size = new System.Drawing.Size(107, 23);
             this.btnAddAttachment.TabIndex = 20;
             this.btnAddAttachment.Text = "Add Attachment";
             this.btnAddAttachment.UseVisualStyleBackColor = true;
@@ -227,9 +228,9 @@ namespace MailSenderLibTester
             // lstAttachments
             // 
             this.lstAttachments.FormattingEnabled = true;
-            this.lstAttachments.Location = new System.Drawing.Point(256, 480);
+            this.lstAttachments.Location = new System.Drawing.Point(305, 485);
             this.lstAttachments.Name = "lstAttachments";
-            this.lstAttachments.Size = new System.Drawing.Size(414, 82);
+            this.lstAttachments.Size = new System.Drawing.Size(365, 82);
             this.lstAttachments.TabIndex = 21;
             // 
             // lblStatus
@@ -253,7 +254,7 @@ namespace MailSenderLibTester
             // 
             // btnSend2
             // 
-            this.btnSend2.Location = new System.Drawing.Point(15, 538);
+            this.btnSend2.Location = new System.Drawing.Point(18, 544);
             this.btnSend2.Name = "btnSend2";
             this.btnSend2.Size = new System.Drawing.Size(120, 23);
             this.btnSend2.TabIndex = 26;
@@ -263,19 +264,30 @@ namespace MailSenderLibTester
             // 
             // btnDeleteAttachments
             // 
-            this.btnDeleteAttachments.Location = new System.Drawing.Point(130, 509);
+            this.btnDeleteAttachments.Location = new System.Drawing.Point(179, 514);
             this.btnDeleteAttachments.Name = "btnDeleteAttachments";
-            this.btnDeleteAttachments.Size = new System.Drawing.Size(120, 23);
+            this.btnDeleteAttachments.Size = new System.Drawing.Size(107, 23);
             this.btnDeleteAttachments.TabIndex = 27;
             this.btnDeleteAttachments.Text = "Delete Attachments";
             this.btnDeleteAttachments.UseVisualStyleBackColor = true;
             this.btnDeleteAttachments.Click += new System.EventHandler(this.btnDeleteAttachments_Click);
+            // 
+            // lblCount
+            // 
+            this.lblCount.AutoSize = true;
+            this.lblCount.Location = new System.Drawing.Point(13, 514);
+            this.lblCount.Name = "lblCount";
+            this.lblCount.Size = new System.Drawing.Size(13, 13);
+            this.lblCount.TabIndex = 28;
+            this.lblCount.Text = "0";
+            this.lblCount.Click += new System.EventHandler(this.lblCount_Click);
             // 
             // MainForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(695, 699);
+            this.Controls.Add(this.lblCount);
             this.Controls.Add(this.btnDeleteAttachments);
             this.Controls.Add(this.btnSend2);
             this.Controls.Add(this.checkSaveInSent);
@@ -337,5 +349,6 @@ namespace MailSenderLibTester
         private System.Windows.Forms.CheckBox checkSaveInSent;
         private System.Windows.Forms.Button btnSend2;
         private System.Windows.Forms.Button btnDeleteAttachments;
+        private System.Windows.Forms.Label lblCount;
     }
 }

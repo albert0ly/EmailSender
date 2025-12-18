@@ -40,7 +40,7 @@ namespace MailSenderLibTester
         private readonly ILogger<GraphMailSender> _logger;
 
         private GraphMailSender mailService = null;
-
+        private int count = 0;
         public MainForm()
         {
             InitializeComponent();
@@ -79,7 +79,7 @@ namespace MailSenderLibTester
                 "txtTenant", "lblTenant", "txtClientId","txtClientSecret", "lblClientSecret", "lblClientId", "txtMailbox",
                 "txtTo","txtCc","txtBcc","txtSubject","txtBody", "btnDeleteAttachments",
                 "chkIsHtml","btnSend","btnAddAttachment","lstAttachments","lblStatus","btnSend", "btnSend2", "checkSaveInSent","lblMailbox",
-                "lblTo","lblCc","lblBcc","lblSubject","lblBody"
+                "lblTo","lblCc","lblBcc","lblSubject","lblBody", "lblCount"
             };
 
             foreach (var name in sendControlNames)
@@ -385,12 +385,12 @@ namespace MailSenderLibTester
                     if (mailService == null)
                         mailService = new GraphMailSender(optionsAuth, _logger);
 
-
+                    count++;
                     mailService.SendEmailAsync(
                         toRecipients: to,
                         ccRecipients: cc,
                         bccRecipients: bcc,
-                        subject: subject,
+                        subject: subject + $"-{count.ToString()}",
                         body: body,
                         isHtml: isHtml,
                         attachments: attachments,
@@ -398,7 +398,8 @@ namespace MailSenderLibTester
                     );
 
                     stopwatch.Stop();
-           
+                    
+                    lblCount.Text = count.ToString();
                 }
                 finally
                 {
@@ -421,5 +422,12 @@ namespace MailSenderLibTester
             lstAttachments.Items.Clear();
             _attachmentPaths.Clear();
         }
+
+        private void lblCount_Click(object sender, EventArgs e)
+        {
+            count = 0;
+            lblCount.Text = "0";
+        }
+
     }
 }
