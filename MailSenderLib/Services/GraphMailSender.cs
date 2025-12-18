@@ -124,7 +124,7 @@ namespace MailSenderLib.Services
         {
             // Simplified: rely on ClientSecretCredential built-in caching/refresh
             var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
-            _logger?.LogTokenAcquired(token.ExpiresOn);
+            //_logger?.LogTokenAcquired(token.ExpiresOn);
             return token.Token;
         }
 
@@ -182,7 +182,7 @@ namespace MailSenderLib.Services
 
                         _logger?.LogRetrying(
                             retryAttempt,
-                            delay,
+                            delay.TotalSeconds,
                             outcome.Result?.StatusCode ?? 0,
                             body ?? "No response body",
                             contentReadException);
@@ -413,11 +413,14 @@ namespace MailSenderLib.Services
                         var contentType = GetMimeType(attachment.FileName);
 
                         _logger?.LogAttachingFile(attachment.FileName, fileSize);
-
                         if (fileSize > LargeAttachmentThreshold) // > 3MB
+                        {
                             await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
+                        }
                         else
+                        {
                             await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
+                        }
                     }
                 }
 
@@ -622,98 +625,175 @@ namespace MailSenderLib.Services
 
 
         private async Task UploadLargeAttachmentStreamAsync(
-            string fromEmail, string messageId,
-            string fileName, string filePath, long fileSize, string contentType,
+            string fromEmail, string messageId, string fileName,
+            string filePath, long fileSize, string contentType,
             CancellationToken ct)
         {
             fileName = fileName.SanitizeFilename();
+            const int maxSessionRetries = 3;
 
-            var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
-            var sessionData = new
+            for (int sessionAttempt = 0; sessionAttempt < maxSessionRetries; sessionAttempt++)
             {
-                AttachmentItem = new 
+                try
                 {
-                    attachmentType = "file",
-                    name = fileName,
-                    size = fileSize
-                }
-            };
-            var sessionJson = JsonConvert.SerializeObject(sessionData);
-            var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-
-            var sessionResponse = await SendWithRetryAsync(() =>
-            {
-                var req = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                req.Content = new StringContent(sessionJson, Encoding.UTF8, "application/json");
-                return req;
-            }, ct).ConfigureAwait(false);
-
-            sessionResponse.EnsureSuccessStatusCode();
-            var sessionBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
-                ?? throw new GraphMailAttachmentException("uploadUrl not found");
-
-            // Upload in chunks using streaming (5MB chunks)
-            var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
-            long offset = 0;
-
-            try
-            {
-                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
-                while (offset < fileSize)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    int bytesRead = await fs.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct);
-
-                    // Validate that we read the expected number of bytes
-                    if (bytesRead <= 0)
+                    var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
+                    var sessionData = new
                     {
-                        throw new GraphMailAttachmentException(
-                            $"Unexpected end of file while uploading '{fileName}'. " +
-                            $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
-                            $"File size: {fileSize}, bytes uploaded: {offset}");
-                    }
+                        AttachmentItem = new
+                        {
+                            attachmentType = "file",
+                            name = fileName,
+                            size = fileSize
+                        }
+                    };
+                    var sessionJson = JsonConvert.SerializeObject(sessionData);
+                    var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
-                    long end = offset + bytesRead - 1;
-                    var response = await SendWithRetryAsync(() =>
+                    var sessionResponse = await SendWithRetryAsync(() =>
                     {
-                        var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl);
-                        var content = new ByteArrayContent(buffer, 0, bytesRead);                        
-                        req.Content = content;                        
-                        req.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-                        req.Content.Headers.ContentLength = bytesRead;
-                        req.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+                        var req = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                        req.Content = new StringContent(sessionJson, Encoding.UTF8, "application/json");
                         return req;
                     }, ct).ConfigureAwait(false);
 
-                    if (!response.IsSuccessStatusCode)
+                    sessionResponse.EnsureSuccessStatusCode();
+                    var sessionBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
+                        ?? throw new GraphMailAttachmentException("uploadUrl not found");
+
+                    _logger?.LogUploadSessionUrl(uploadUrl.StripAfter('?'), fileName, sessionAttempt+1, maxSessionRetries, messageId);                    
+
+                    var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
+                    long offset = 0;
+
+                    try
                     {
-                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                        _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
-                        throw new GraphMailAttachmentException(
-                            $"Chunk upload failed for '{fileName}' at offset {offset}: " +
-                            $"{(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
+                        while (offset < fileSize)
+                        {
+                            ct.ThrowIfCancellationRequested();
+
+                            int bytesRead = await fs.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct);
+
+                            if (bytesRead <= 0)
+                            {
+                                throw new GraphMailAttachmentException(
+                                    $"Unexpected end of file while uploading '{fileName}'. " +
+                                    $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
+                                    $"File size: {fileSize}, bytes uploaded: {offset}");
+                            }
+
+                            long end = offset + bytesRead - 1;
+
+                            // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
+                            var response = await SendWithRetryAsync(() =>
+                            {
+                                var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl);
+                                var content = new ByteArrayContent(buffer, 0, bytesRead);
+                                req.Content = content;
+                                req.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+                                req.Content.Headers.ContentLength = bytesRead;
+                                req.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
+                                return req;
+                            }, ct).ConfigureAwait(false);
+
+                            // Check for 404 - session expired or not found (Graph API backend issue)
+                            if (response.StatusCode == HttpStatusCode.NotFound)
+                            {
+                                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                                _logger?.LogChunkFailed((int)response.StatusCode,
+                                    $"Chunk upload failed for '{fileName}' at offset {offset}: " +
+                                    $"SESSION_EXPIRED: {response.ReasonPhrase ?? ""}", errorBody);
+
+                                // Throw special exception to trigger session retry
+                                throw new GraphMailAttachmentException("SESSION_EXPIRED");
+                            }
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                                _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
+                                throw new GraphMailAttachmentException(
+                                    $"Chunk upload failed for '{fileName}' at offset {offset}: " +
+                                    $"{(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                            }
+
+                            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            offset = end + 1;
+                            _logger?.LogChunkStatus(offset, fileSize, fileName, (int)response.StatusCode);
+
+                            // Check nextExpectedRanges to see if we can break early
+                            if (!string.IsNullOrWhiteSpace(responseBody))
+                            {
+                                var responseJson = JObject.Parse(responseBody);
+                                if (responseJson["nextExpectedRanges"] is JArray nextRanges && nextRanges.Count > 0)
+                                {
+                                    _logger?.LogResponseBodyTrace($"Next expected ranges: {string.Join(", ", nextRanges)}");
+                                    continue;
+                                }
+                                // No nextExpectedRanges means upload is complete
+                                break;
+                            }
+                        }
+
+                        if (offset != fileSize)
+                        {
+                            throw new GraphMailAttachmentException(
+                                $"Incomplete file upload for '{fileName}'. " +
+                                $"Expected to upload {fileSize} bytes but only uploaded {offset} bytes.");
+                        }
+
+                        _logger?.LogUploadComplete(fileName);
+
+                        // Success - return from method
+                        return;
                     }
-                    offset = end + 1;
+                    catch (OperationCanceledException ex)
+                    {
+                        _logger?.LogUploadCancelled(fileName, offset, fileSize, ex);
+                        throw;
+                    }
+                    catch (IOException ex)
+                    {
+                        throw new GraphMailAttachmentException(
+                            $"IO error while reading file '{fileName}' at offset {offset}: {ex.Message}", ex);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
                 }
-
-                //Final validation that we uploaded the complete file
-                if (offset != fileSize)
+                catch (GraphMailAttachmentException ex) when (
+                    ex.Message.Contains("SESSION_EXPIRED") ||
+                    ex.Message.Contains("ErrorItemNotFound"))
                 {
-                    throw new GraphMailAttachmentException(
-                        $"Incomplete file upload for '{fileName}'. " +
-                        $"Expected to upload {fileSize} bytes but only uploaded {offset} bytes. " +
-                        $"The file may have been truncated or modified during upload.");
-                }
+                    // This is a known Graph API backend issue - intermittent failures
+                    // where upload sessions become invalid immediately or aren't properly
+                    // initialized in Exchange backend
 
-                _logger?.LogUploadComplete(fileName);
+                    if (sessionAttempt == maxSessionRetries - 1)
+                    {
+                        // Last attempt failed - throw with context
+                        throw new GraphMailAttachmentException(
+                            $"Failed to upload '{fileName}' after {maxSessionRetries} session attempts. " +
+                            $"This appears to be a Graph API backend issue (ErrorItemNotFound). " +
+                            $"Draft message: {messageId}", ex);
+                    }
+
+                    // Calculate exponential backoff delay: 1s, 2s, 4s
+                    var delaySeconds = Math.Pow(2, sessionAttempt);
+                    _logger?.LogSessionExpired(fileName, sessionAttempt+1, maxSessionRetries, delaySeconds, ex);
+
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
+
+                    // Loop continues - will create new session and retry
+                }
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-            }
+
+            // Should never reach here due to return or throw in loop
+            throw new GraphMailAttachmentException(
+                $"Failed to upload '{fileName}' - unexpected exit from retry loop");
         }
 
         private static string GetMimeType(string fileName)

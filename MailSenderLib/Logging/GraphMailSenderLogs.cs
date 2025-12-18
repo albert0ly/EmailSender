@@ -45,9 +45,9 @@ namespace MailSenderLib.Logging
             LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1021, nameof(MessageSent)),
                 "Message sent successfully without saving to Sent Items {MessageId}");
 
-        internal static readonly Action<ILogger, string, string, Exception?> UploadSessionUrl =
-            LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(1013, nameof(UploadSessionUrl)),
-                "Upload session URL: {Url} for file: {FileName}");
+        internal static readonly Action<ILogger, string, string, int, int, string, Exception?> UploadSessionUrl =
+            LoggerMessage.Define<string, string, int, int, string>(LogLevel.Debug, new EventId(1013, nameof(UploadSessionUrl)),
+                "Upload session URL: {Url} for file: {FileName}. Attempt {SessionAttempt}/{MaxSessionRetries}. Draft: {MessageId}");        
 
         internal static readonly Action<ILogger, long, long, string, int, Exception?> ChunkStatus =
             LoggerMessage.Define<long, long, string, int>(LogLevel.Debug, new EventId(1010, nameof(ChunkStatus)),
@@ -72,13 +72,18 @@ namespace MailSenderLib.Logging
             LoggerMessage.Define<string, long, long>(LogLevel.Error, new EventId(1023, nameof(UploadCancelled)),
                 "Upload of '{FileName}' was cancelled at offset {Offset}/{FileSize}");
 
-        internal static readonly Action<ILogger, int, TimeSpan, HttpStatusCode, string, Exception?> Retrying =
-            LoggerMessage.Define<int, TimeSpan, HttpStatusCode, string>(LogLevel.Warning, new EventId(1024, nameof(Retrying)),
-                "Retrying Graph API call. Attempt {RetryAttempt}, waiting {TimeSpan.TotalSeconds:F1}s. Status: {StatusCode}. Reason: {Reason}");
+        internal static readonly Action<ILogger, int, double, HttpStatusCode, string, Exception?> Retrying =
+            LoggerMessage.Define<int, double, HttpStatusCode, string>(LogLevel.Warning, new EventId(1024, nameof(Retrying)),
+                "Retrying Graph API call. Attempt {RetryAttempt}, waiting {DelaySeconds:F1}s. Status: {StatusCode}. Reason: {Reason}");
 
         internal static readonly Action<ILogger, long, string, Exception?> ExecutionStep =
             LoggerMessage.Define<long, string>(LogLevel.Information, new EventId(1025, nameof(ExecutionStep)),
                 "ExecutionStep: Elapsed: {ElapsedTime} ms. {Description}");
+
+        internal static readonly Action<ILogger, string, int, int,  double, Exception?> SessionExpired =
+            LoggerMessage.Define<string, int, int, double>(LogLevel.Warning, new EventId(1026, nameof(SessionExpired)),
+                "Upload session failed for '{FileName}' (attempt {SessionAttempt}/{MaxSessionRetries}). Recreating session in {DelaySeconds:F1}s." +
+                " This is a known Graph API backend issue.");
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -113,8 +118,8 @@ namespace MailSenderLib.Logging
         public static void LogMessageSent(this ILogger logger, string messageId) =>
             GraphMailSenderLogs.MessageSent(logger, messageId, null);
 
-        public static void LogUploadSessionUrl(this ILogger logger, string url, string fileName) =>
-            GraphMailSenderLogs.UploadSessionUrl(logger, url, fileName, null);
+        public static void LogUploadSessionUrl(this ILogger logger, string url, string fileName, int sessionAttempt, int maxSessionRetries, string messageId) =>
+            GraphMailSenderLogs.UploadSessionUrl(logger, url, fileName, sessionAttempt, maxSessionRetries, messageId, null);
 
         public static void LogChunkStatus(this ILogger logger, long current, long total, string fileName, int status) =>
             GraphMailSenderLogs.ChunkStatus(logger, current, total, fileName,  status, null);
@@ -134,12 +139,14 @@ namespace MailSenderLib.Logging
         public static void LogUploadCancelled(this ILogger logger, string fileName, long offset, long fileSize, Exception? ex=null) =>
             GraphMailSenderLogs.UploadCancelled(logger, fileName, offset, fileSize, ex);
 
-        public static void LogRetrying(this ILogger logger, int retryAttempt, TimeSpan timeSpan, HttpStatusCode statusCode, string reason, Exception? ex = null) =>
+        public static void LogRetrying(this ILogger logger, int retryAttempt, double timeSpan, HttpStatusCode statusCode, string reason, Exception? ex = null) =>
             GraphMailSenderLogs.Retrying(logger, retryAttempt, timeSpan, statusCode, reason, ex);
 
         public static void LogExecutionStep(this ILogger logger, string description, long elapsedTime) =>
             GraphMailSenderLogs.ExecutionStep(logger, elapsedTime, description, null);
 
+        public static void LogSessionExpired(this ILogger logger, string fileName, int sessionAttempt, int maxSessionRetries, double delaySeconds, Exception? ex = null) =>
+            GraphMailSenderLogs.SessionExpired(logger, fileName, sessionAttempt, maxSessionRetries, delaySeconds, ex);
 
     }
 }
