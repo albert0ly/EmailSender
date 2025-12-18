@@ -460,72 +460,25 @@ namespace MailSenderLib.Services
                     message = cleanMessage,
                     saveToSentItems = false 
                 };
-                ///////////////////// Old Code /////////////////////
-                //var sendJson = JsonConvert.SerializeObject(sendPayload);
-                //token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-
-                //var sendResponse = await SendWithRetryAsync(() =>
-                //{
-                //    var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
-                //    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                //    req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
-                //    return req;
-                //}, ct).ConfigureAwait(false);
-
-                //if (!sendResponse.IsSuccessStatusCode)
-                //{
-                //    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                //    _logger?.LogFailedToSendMessage(error);
-                //    throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
-                //}
-
-                /////////////// New Code /////////////////////
-                
-                // Stream the serialization instead of creating a huge string
+    
+                var sendJson = JsonConvert.SerializeObject(sendPayload);
                 token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
-                using (var memoryStream = new MemoryStream())
-                using (var streamWriter = new StreamWriter(memoryStream, Encoding.UTF8, bufferSize: 8192, leaveOpen: true))
-                using (var jsonWriter = new JsonTextWriter(streamWriter))
+                var sendResponse = await SendWithRetryAsync(() =>
                 {
-                    var serializer = new JsonSerializer();
-                    serializer.Serialize(jsonWriter, sendPayload);
-                    await jsonWriter.FlushAsync(ct).ConfigureAwait(false);
-                    await streamWriter.FlushAsync().ConfigureAwait(false);
+                    var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
+                    return req;
+                }, ct).ConfigureAwait(false);
 
-                    memoryStream.Position = 0;
-
-                    using (var content = new StreamContent(memoryStream, bufferSize: 8192))
-                    {
-                        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-
-                        //var sendResponse = await SendWithRetryAsync(() =>
-                        //{
-                        //    var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);                            
-                        //    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                        //    req.Content = content;
-                        //    return req;
-                        //}, ct).ConfigureAwait(false);
-
-
-                        using (var request = new HttpRequestMessage(HttpMethod.Post, sendUrl))
-                        {
-                            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                            request.Content = content;
-
-                            var sendResponse = await SendWithRetryAsync(() => request, ct).ConfigureAwait(false);
-
-                            if (!sendResponse.IsSuccessStatusCode)
-                            {
-                                var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                                _logger?.LogFailedToSendMessage(error);
-                                throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
-                            }
-                        }
-                    }
+                if (!sendResponse.IsSuccessStatusCode)
+                {
+                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
+                    _logger?.LogFailedToSendMessage(error);
+                    throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
                 }
 
-                /////////////////////////////////////////////
                 _logger?.LogMessageSent(messageId);
             }
             catch (Exception ex)
@@ -678,7 +631,12 @@ namespace MailSenderLib.Services
             var sessionUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments/createUploadSession";
             var sessionData = new
             {
-                AttachmentItem = new { attachmentType = "file", name = fileName, size = fileSize }
+                AttachmentItem = new 
+                {
+                    attachmentType = "file",
+                    name = fileName,
+                    size = fileSize
+                }
             };
             var sessionJson = JsonConvert.SerializeObject(sessionData);
             var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
@@ -696,6 +654,7 @@ namespace MailSenderLib.Services
             var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
                 ?? throw new GraphMailAttachmentException("uploadUrl not found");
 
+            // Upload in chunks using streaming (5MB chunks)
             var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
             long offset = 0;
 
@@ -705,8 +664,17 @@ namespace MailSenderLib.Services
                 while (offset < fileSize)
                 {
                     ct.ThrowIfCancellationRequested();
+
                     int bytesRead = await fs.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct);
-                    if (bytesRead <= 0) throw new GraphMailAttachmentException("Unexpected EOF");
+
+                    // Validate that we read the expected number of bytes
+                    if (bytesRead <= 0)
+                    {
+                        throw new GraphMailAttachmentException(
+                            $"Unexpected end of file while uploading '{fileName}'. " +
+                            $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
+                            $"File size: {fileSize}, bytes uploaded: {offset}");
+                    }
 
                     long end = offset + bytesRead - 1;
                     var response = await SendWithRetryAsync(() =>
@@ -720,11 +688,26 @@ namespace MailSenderLib.Services
                         return req;
                     }, ct).ConfigureAwait(false);
 
-                    response.EnsureSuccessStatusCode();
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        _logger?.LogChunkFailed((int)response.StatusCode, response.ReasonPhrase ?? "", errorBody);
+                        throw new GraphMailAttachmentException(
+                            $"Chunk upload failed for '{fileName}' at offset {offset}: " +
+                            $"{(int)response.StatusCode} {response.ReasonPhrase} - {errorBody}");
+                    }
                     offset = end + 1;
                 }
 
-                if (offset != fileSize) throw new GraphMailAttachmentException("Upload incomplete");
+                //Final validation that we uploaded the complete file
+                if (offset != fileSize)
+                {
+                    throw new GraphMailAttachmentException(
+                        $"Incomplete file upload for '{fileName}'. " +
+                        $"Expected to upload {fileSize} bytes but only uploaded {offset} bytes. " +
+                        $"The file may have been truncated or modified during upload.");
+                }
+
                 _logger?.LogUploadComplete(fileName);
             }
             finally
