@@ -48,12 +48,17 @@ namespace MailSenderLibTester
 
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Debug()
-                .WriteTo.Console()
+                .Enrich.FromLogContext()
+                .WriteTo.Console(
+                   outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}"
+                 )
                 .WriteTo.File(
                     path: "logs/app-.log",          // note the "-" for rolling
                     rollingInterval: RollingInterval.Day,
                     retainedFileCountLimit: 7,      // keep last 7 days
-                    shared: true
+                    shared: true,
+                    outputTemplate:
+                        "[{Timestamp:yyyy-MM-dd HH:mm:ss} {Level:u3}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}"
                 ).CreateLogger();
 
             var loggerFactory = LoggerFactory.Create(builder =>
@@ -383,7 +388,7 @@ namespace MailSenderLibTester
                     stopwatch.Start();
 
                     if (mailService == null)
-                        mailService = new GraphMailSender(optionsAuth, _logger);
+                        mailService = new GraphMailSender(optionsAuth, logger:_logger);
 
                     count++;
                     mailService.SendEmailAsync(
@@ -394,7 +399,8 @@ namespace MailSenderLibTester
                         body: body,
                         isHtml: isHtml,
                         attachments: attachments,
-                        fromEmail: optionsAuth.MailboxAddress
+                        fromEmail: optionsAuth.MailboxAddress,
+                        correlationId: Guid.NewGuid().ToString("N")
                     );
 
                     stopwatch.Stop();

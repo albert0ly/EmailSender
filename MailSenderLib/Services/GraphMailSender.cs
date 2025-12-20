@@ -317,252 +317,270 @@ namespace MailSenderLib.Services
             string token = string.Empty;
             string userEncoded = string.Empty;
             var sw = Stopwatch.StartNew();
+            IDisposable? scope = null;
+
+            var effectiveCorrelationId =
+                correlationId
+                ?? Activity.Current?.Id
+                ?? Guid.NewGuid().ToString("N");
+
+            if (_logger != null)
+            {
+                //scope = _logger.BeginScope(new { CorrelationId = effectiveCorrelationId });
+                scope = _logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = effectiveCorrelationId });
+            }
 
             try
             {
-                if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
+                try
                 {
-                    _httpClient.Timeout = options.HttpClientTimeout.Value;
-                }
-
-                if (toRecipients == null || !(toRecipients.Count > 0))
-                    throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
-
-                fromEmail ??= _optionsAuth.MailboxAddress;
-                userEncoded = Uri.EscapeDataString(fromEmail);
-
-                _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
-
-                body = EmailSanitizer.SanitizeBody(body);
-                subject = EmailSanitizer.SanitizeSubject(subject);
-
-                // Fetch token on demand
-                token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-
-                _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
-
-                var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
-
-                var message = new MessagePayload
-                {
-                    Subject = subject,
-                    Body = new BodyPayload 
-                    { 
-                        ContentType = isHtml ? "HTML" : "Text",
-                        Content = body 
-                    },
-                    ToRecipients = toRecipients.Select(email => new RecipientPayload
+                    if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
                     {
-                        EmailAddress = new EmailAddressPayload { Address = email }
-                    }).ToList()
-                };
-
-                if (ccRecipients?.Count > 0)
-                    message.CcRecipients = ccRecipients.Select(email => new RecipientPayload
-                    {
-                        EmailAddress = new EmailAddressPayload { Address = email }
-                    }).ToList();
-
-                if (bccRecipients?.Count > 0)
-                    message.BccRecipients = bccRecipients.Select(email => new RecipientPayload
-                    {
-                        EmailAddress = new EmailAddressPayload { Address = email }
-                    }).ToList();
-
-                var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
-                {
-                    NullValueHandling = NullValueHandling.Ignore,
-                    ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
-                });
-
-                // Create draft
-                var messageResponse = await SendWithRetryAsync(() =>
-                {
-                    var req = new HttpRequestMessage(HttpMethod.Post, messageUrl);
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                    req.Content = new StringContent(messageJson, Encoding.UTF8, "application/json");
-                    return req;
-                }, ct).ConfigureAwait(false);
-
-                if (!messageResponse.IsSuccessStatusCode)
-                {
-                    var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
-                    _logger?.LogFailedToCreateMessage(error);
-                    throw new GraphMailFailedCreateMessageException($"Failed to create message: {error}");
-                }
-
-                var messageResponseBody = await messageResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var createdMessage = JObject.Parse(messageResponseBody);
-                messageId = createdMessage["id"]?.ToString()
-                    ?? throw new GraphMailFailedCreateMessageException($"Message ID not found in response: {messageResponseBody}");
-
-                _logger?.LogDraftCreated(messageId);
-                draftCreated = true;
-
-                // Attach files
-                _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
-                if (attachments?.Count > 0)
-                {
-                    // Validate total attachment size to prevent memory issues
-                    long totalSize = 0;
-                    foreach (var attachment in attachments)
-                    {
-                        if (!File.Exists(attachment.FilePath))
-                        {
-                            throw new FileNotFoundException($"Attachment file not found: {attachment.FilePath}", attachment.FilePath);
-                        }
-
-                        var fileInfo = new FileInfo(attachment.FilePath);
-                        if (fileInfo.Length == 0)
-                        {
-                            throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
-                        }
-
-                        totalSize += fileInfo.Length;
+                        _httpClient.Timeout = options.HttpClientTimeout.Value;
                     }
 
-                    if (totalSize > MaxTotalAttachmentSize)
+                    if (toRecipients == null || !(toRecipients.Count > 0))
+                        throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
+
+                    fromEmail ??= _optionsAuth.MailboxAddress;
+                    userEncoded = Uri.EscapeDataString(fromEmail);
+
+                    _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
+
+                    body = EmailSanitizer.SanitizeBody(body);
+                    subject = EmailSanitizer.SanitizeSubject(subject);
+
+                    // Fetch token on demand
+                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+
+                    _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
+
+                    var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
+
+                    var message = new MessagePayload
                     {
-                        throw new GraphMailAttachmentException(
-                            $"Total attachment size ({totalSize / 1024 / 1024}MB) exceeds limit ({MaxTotalAttachmentSize / 1024 / 1024}MB). " +
-                            $"This protects against memory issues when retrieving the message with attachments.");
+                        Subject = subject,
+                        Body = new BodyPayload
+                        {
+                            ContentType = isHtml ? "HTML" : "Text",
+                            Content = body
+                        },
+                        ToRecipients = toRecipients.Select(email => new RecipientPayload
+                        {
+                            EmailAddress = new EmailAddressPayload { Address = email }
+                        }).ToList()
+                    };
+
+                    if (ccRecipients?.Count > 0)
+                        message.CcRecipients = ccRecipients.Select(email => new RecipientPayload
+                        {
+                            EmailAddress = new EmailAddressPayload { Address = email }
+                        }).ToList();
+
+                    if (bccRecipients?.Count > 0)
+                        message.BccRecipients = bccRecipients.Select(email => new RecipientPayload
+                        {
+                            EmailAddress = new EmailAddressPayload { Address = email }
+                        }).ToList();
+
+                    var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
+                    {
+                        NullValueHandling = NullValueHandling.Ignore,
+                        ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
+                    });
+
+                    // Create draft
+                    var messageResponse = await SendWithRetryAsync(() =>
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Post, messageUrl);
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                        req.Content = new StringContent(messageJson, Encoding.UTF8, "application/json");
+                        return req;
+                    }, ct).ConfigureAwait(false);
+
+                    if (!messageResponse.IsSuccessStatusCode)
+                    {
+                        var error = await GetErrorDetailsAsync(messageResponse).ConfigureAwait(false);
+                        _logger?.LogFailedToCreateMessage(error);
+                        throw new GraphMailFailedCreateMessageException($"Failed to create message: {error}");
                     }
 
-                    foreach (var attachment in attachments)
+                    var messageResponseBody = await messageResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var createdMessage = JObject.Parse(messageResponseBody);
+                    messageId = createdMessage["id"]?.ToString()
+                        ?? throw new GraphMailFailedCreateMessageException($"Message ID not found in response: {messageResponseBody}");
+
+                    _logger?.LogDraftCreated(messageId);
+                    draftCreated = true;
+
+                    // Attach files
+                    _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
+                    if (attachments?.Count > 0)
                     {
-                        var fileInfo = new FileInfo(attachment.FilePath);
-                        var fileSize = fileInfo.Length;
-                        var contentType = GetMimeType(attachment.FileName);
-
-                        _logger?.LogAttachingFile(attachment.FileName, fileSize);
-                        if (fileSize > LargeAttachmentThreshold) // > 3MB
+                        // Validate total attachment size to prevent memory issues
+                        long totalSize = 0;
+                        foreach (var attachment in attachments)
                         {
-                            await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
-                        }
-                        else
-                        {
-                            await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
-                        }
-                    }
-                }
-
-                // Get full message with attachments
-                _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
-                var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
-                token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                var getResponse = await SendWithRetryAsync(() =>
-                {
-                    var req = new HttpRequestMessage(HttpMethod.Get, getMessageUrl);
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                    return req;
-                }, ct).ConfigureAwait(false);
-                
-                if (!getResponse.IsSuccessStatusCode)
-                {
-                    var error = await GetErrorDetailsAsync(getResponse).ConfigureAwait(false);
-                    _logger?.LogFailedToGetMessage(messageId, error);
-                    throw new GraphMailFailedCreateMessageException($"Failed to retrieve message with attachments: {error}");
-                }
-
-                // Stream the JSON response directly to avoid loading entire response into memory
-                // This is critical for large attachments with base64-encoded contentBytes
-                JObject completeMessage;
-                using (var stream = await getResponse.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192))
-                using (var jsonReader = new JsonTextReader(streamReader)
-                {
-                    // Use ArrayPool to reduce memory allocations during JSON parsing
-                    //ArrayPool = JsonArrayPool.Instance
-                })
-                {
-                    var serializer = new JsonSerializer();
-                    completeMessage = serializer.Deserialize<JObject>(jsonReader)
-                        ?? throw new GraphMailFailedCreateMessageException("Failed to parse message response");
-                }
-
-                // Remove read-only fields
-                var cleanMessage = CleanMessageForSending(completeMessage);
-
-                // Send mail
-                _logger?.LogExecutionStep("Step 4: Send using sendMail endpoint", sw.ElapsedMilliseconds);
-                var sendUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/sendMail";
-                var sendPayload = new 
-                { 
-                    message = cleanMessage,
-                    saveToSentItems = false 
-                };
-    
-                var sendJson = JsonConvert.SerializeObject(sendPayload);
-                token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-
-                var sendResponse = await SendWithRetryAsync(() =>
-                {
-                    var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                    req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
-                    return req;
-                }, ct).ConfigureAwait(false);
-
-                if (!sendResponse.IsSuccessStatusCode)
-                {
-                    var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
-                    _logger?.LogFailedToSendMessage(error);
-                    throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
-                }
-
-                _logger?.LogMessageSent(messageId);
-            }
-            catch (Exception ex)
-            {
-                originalException = ex;
-                _logger?.LogFailedToSendMessage("", ex);
-
-                // Don't throw yet - we'll handle it in finally after cleanup attempt
-            }
-            finally
-            {
-                _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
-                if (draftCreated && !string.IsNullOrEmpty(messageId))
-                {
-                    try
-                    {
-                        var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}";
-                        var tokenForDelete = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                        var deleteResponse = await SendWithRetryAsync(() =>
-                        {
-                            var req = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
-                            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenForDelete);
-                            return req;
-                        }, ct).ConfigureAwait(false);
-
-                        if (!deleteResponse.IsSuccessStatusCode)
-                        {
-                            var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
-                            _logger?.LogFailedToDeleteDraft(messageId, error);
-                            var cleanupEx = new GraphMailFailedDeleteDraftMessageException($"Failed to delete draft message {messageId}, Error {error}");
-                            if (originalException != null)
+                            if (!File.Exists(attachment.FilePath))
                             {
-                                originalException = new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx);
+                                throw new FileNotFoundException($"Attachment file not found: {attachment.FilePath}", attachment.FilePath);
+                            }
+
+                            var fileInfo = new FileInfo(attachment.FilePath);
+                            if (fileInfo.Length == 0)
+                            {
+                                throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
+                            }
+
+                            totalSize += fileInfo.Length;
+                        }
+
+                        if (totalSize > MaxTotalAttachmentSize)
+                        {
+                            throw new GraphMailAttachmentException(
+                                $"Total attachment size ({totalSize / 1024 / 1024}MB) exceeds limit ({MaxTotalAttachmentSize / 1024 / 1024}MB). " +
+                                $"This protects against memory issues when retrieving the message with attachments.");
+                        }
+
+                        foreach (var attachment in attachments)
+                        {
+                            var fileInfo = new FileInfo(attachment.FilePath);
+                            var fileSize = fileInfo.Length;
+                            var contentType = GetMimeType(attachment.FileName);
+
+                            _logger?.LogAttachingFile(attachment.FileName, fileSize);
+                            if (fileSize > LargeAttachmentThreshold) // > 3MB
+                            {
+                                await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
                             }
                             else
                             {
-                                originalException = cleanupEx;
+                                await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
                             }
                         }
                     }
-                    catch (Exception cleanupEx)
-                    {
-                        originalException = originalException != null
-                            ? new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx)
-                            : cleanupEx;
-                    }
-                }
 
-                if (originalException != null)
-                    throw originalException;
+                    // Get full message with attachments
+                    _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
+                    var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
+                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+                    var getResponse = await SendWithRetryAsync(() =>
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Get, getMessageUrl);
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                        return req;
+                    }, ct).ConfigureAwait(false);
+
+                    if (!getResponse.IsSuccessStatusCode)
+                    {
+                        var error = await GetErrorDetailsAsync(getResponse).ConfigureAwait(false);
+                        _logger?.LogFailedToGetMessage(messageId, error);
+                        throw new GraphMailFailedCreateMessageException($"Failed to retrieve message with attachments: {error}");
+                    }
+
+                    // Stream the JSON response directly to avoid loading entire response into memory
+                    // This is critical for large attachments with base64-encoded contentBytes
+                    JObject completeMessage;
+                    using (var stream = await getResponse.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                    using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192))
+                    using (var jsonReader = new JsonTextReader(streamReader)
+                    {
+                        // Use ArrayPool to reduce memory allocations during JSON parsing
+                        //ArrayPool = JsonArrayPool.Instance
+                    })
+                    {
+                        var serializer = new JsonSerializer();
+                        completeMessage = serializer.Deserialize<JObject>(jsonReader)
+                            ?? throw new GraphMailFailedCreateMessageException("Failed to parse message response");
+                    }
+
+                    // Remove read-only fields
+                    var cleanMessage = CleanMessageForSending(completeMessage);
+
+                    // Send mail
+                    _logger?.LogExecutionStep("Step 4: Send using sendMail endpoint", sw.ElapsedMilliseconds);
+                    var sendUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/sendMail";
+                    var sendPayload = new
+                    {
+                        message = cleanMessage,
+                        saveToSentItems = false
+                    };
+
+                    var sendJson = JsonConvert.SerializeObject(sendPayload);
+                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+
+                    var sendResponse = await SendWithRetryAsync(() =>
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                        req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
+                        return req;
+                    }, ct).ConfigureAwait(false);
+
+                    if (!sendResponse.IsSuccessStatusCode)
+                    {
+                        var error = await GetErrorDetailsAsync(sendResponse).ConfigureAwait(false);
+                        _logger?.LogFailedToSendMessage(error);
+                        throw new GraphMailFailedSendMessageException($"Failed to send message: {error}");
+                    }
+
+                    _logger?.LogMessageSent(messageId);
+                }
+                catch (Exception ex)
+                {
+                    originalException = ex;
+                    _logger?.LogFailedToSendMessage("", ex);
+
+                    // Don't throw yet - we'll handle it in finally after cleanup attempt
+                }
+                finally
+                {
+                    _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
+                    if (draftCreated && !string.IsNullOrEmpty(messageId))
+                    {
+                        try
+                        {
+                            var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}";
+                            var tokenForDelete = await GetAccessTokenAsync(ct).ConfigureAwait(false);
+                            var deleteResponse = await SendWithRetryAsync(() =>
+                            {
+                                var req = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
+                                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenForDelete);
+                                return req;
+                            }, ct).ConfigureAwait(false);
+
+                            if (!deleteResponse.IsSuccessStatusCode)
+                            {
+                                var error = await GetErrorDetailsAsync(deleteResponse).ConfigureAwait(false);
+                                _logger?.LogFailedToDeleteDraft(messageId, error);
+                                var cleanupEx = new GraphMailFailedDeleteDraftMessageException($"Failed to delete draft message {messageId}, Error {error}");
+                                if (originalException != null)
+                                {
+                                    originalException = new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx);
+                                }
+                                else
+                                {
+                                    originalException = cleanupEx;
+                                }
+                            }
+                        }
+                        catch (Exception cleanupEx)
+                        {
+                            originalException = originalException != null
+                                ? new AggregateException("Email operation failed with multiple errors", originalException, cleanupEx)
+                                : cleanupEx;
+                        }
+                    }
+
+                    if (originalException != null)
+                        throw originalException;
+                }
+            }
+            finally
+            {
+                scope?.Dispose();
             }
         }
-
 
         private static JObject CleanMessageForSending(JObject completeMessage)
         {
