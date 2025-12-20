@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
 using System.Net;
+using System.Runtime.InteropServices.ComTypes;
 
 namespace MailSenderLib.Logging
 {
@@ -84,6 +85,18 @@ namespace MailSenderLib.Logging
             LoggerMessage.Define<string, int, int, double>(LogLevel.Warning, new EventId(1026, nameof(SessionExpired)),
                 "Upload session failed for '{FileName}' (attempt {SessionAttempt}/{MaxSessionRetries}). Recreating session in {DelaySeconds:F1}s." +
                 " This is a known Graph API backend issue.");
+
+        internal static readonly Action<ILogger, string, string, Exception?> FailedToGetMessage =
+            LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1027, nameof(FailedToGetMessage)),
+                "Failed to retrieve message {MessageId} with attachments: {Error}");
+
+        internal static readonly Action<ILogger, string, string, Exception?> FailedToAddAttachment =
+            LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1028, nameof(FailedToAddAttachment)),
+                "Failed to add small attachment '{FileName}': {Error}");
+
+        internal static readonly Action<ILogger, string, string, Exception?> FailedToCreateUploadSession =
+            LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1029, nameof(FailedToCreateUploadSession)),
+                "Failed to create upload session for '{FileName}': {Error}");
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -147,6 +160,15 @@ namespace MailSenderLib.Logging
 
         public static void LogSessionExpired(this ILogger logger, string fileName, int sessionAttempt, int maxSessionRetries, double delaySeconds, Exception? ex = null) =>
             GraphMailSenderLogs.SessionExpired(logger, fileName, sessionAttempt, maxSessionRetries, delaySeconds, ex);
+
+        public static void LogFailedToGetMessage(this ILogger logger, string messageId, string error, Exception? ex = null) =>
+            GraphMailSenderLogs.FailedToGetMessage(logger, messageId, error,  ex);
+
+        public static void LogFailedToAddAttachment(this ILogger logger, string fileName, string error, Exception? ex = null) =>
+            GraphMailSenderLogs.FailedToAddAttachment(logger, fileName, error, ex);
+
+        public static void LogFailedToCreateUploadSession(this ILogger logger, string fileName, string error, Exception? ex = null) =>
+            GraphMailSenderLogs.FailedToCreateUploadSession(logger, fileName, error, ex);
 
     }
 }

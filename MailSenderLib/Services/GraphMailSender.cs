@@ -434,7 +434,13 @@ namespace MailSenderLib.Services
                     req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                     return req;
                 }, ct).ConfigureAwait(false);
-                getResponse.EnsureSuccessStatusCode();
+                
+                if (!getResponse.IsSuccessStatusCode)
+                {
+                    var error = await GetErrorDetailsAsync(getResponse).ConfigureAwait(false);
+                    _logger?.LogFailedToGetMessage(messageId, error);
+                    throw new GraphMailFailedCreateMessageException($"Failed to retrieve message with attachments: {error}");
+                }
 
                 // Stream the JSON response directly to avoid loading entire response into memory
                 // This is critical for large attachments with base64-encoded contentBytes
@@ -619,7 +625,13 @@ namespace MailSenderLib.Services
                 return req;
             }, ct).ConfigureAwait(false);
 
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await GetErrorDetailsAsync(response).ConfigureAwait(false);
+                _logger?.LogFailedToAddAttachment(fileName, error);
+                throw new GraphMailAttachmentException($"Failed to add small attachment '{fileName}': {error}");
+            }
+
             _logger?.LogSmallAttachmentAdded(fileName);
         }
 
@@ -657,7 +669,13 @@ namespace MailSenderLib.Services
                         return req;
                     }, ct).ConfigureAwait(false);
 
-                    sessionResponse.EnsureSuccessStatusCode();
+                    if (!sessionResponse.IsSuccessStatusCode)
+                    {
+                        var error = await GetErrorDetailsAsync(sessionResponse).ConfigureAwait(false);
+                        _logger?.LogFailedToCreateUploadSession(fileName, error);
+                        throw new GraphMailAttachmentException($"Failed to create upload session for '{fileName}': {error}");
+                    }
+
                     var sessionBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                     var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
                         ?? throw new GraphMailAttachmentException("uploadUrl not found");
@@ -704,10 +722,11 @@ namespace MailSenderLib.Services
                                 var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                                 _logger?.LogChunkFailed((int)response.StatusCode,
                                     $"Chunk upload failed for '{fileName}' at offset {offset}: " +
-                                    $"SESSION_EXPIRED: {response.ReasonPhrase ?? ""}", errorBody);
+                                    $"SESSION_INVALID_404: {response.ReasonPhrase ?? ""}", errorBody);
 
                                 // Throw special exception to trigger session retry
-                                throw new GraphMailAttachmentException("SESSION_EXPIRED");
+                                throw new GraphMailAttachmentException("SESSION_INVALID_404",
+                                    new HttpRequestException("Upload session not found (404) during chunk upload – likely backend issue"), fileName);
                             }
 
                             if (!response.IsSuccessStatusCode)
@@ -765,7 +784,7 @@ namespace MailSenderLib.Services
                     }
                 }
                 catch (GraphMailAttachmentException ex) when (
-                    ex.Message.Contains("SESSION_EXPIRED") ||
+                    ex.Message.Contains("SESSION_INVALID_404") ||
                     ex.Message.Contains("ErrorItemNotFound"))
                 {
                     // This is a known Graph API backend issue - intermittent failures
@@ -803,16 +822,43 @@ namespace MailSenderLib.Services
                 : "application/octet-stream";
         }
 
-        private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage response)
+        private static async Task<string> GetErrorDetailsAsync(HttpResponseMessage? response)
         {
             try
             {
+                if (response == null)
+                    return "Error: Response is null";
+
+                if (response.Content == null)
+                    return $"Status: {response.StatusCode}, Body: (no content)";
+
                 var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                // Try to parse and format Graph API error for better readability
+                if (!string.IsNullOrWhiteSpace(errorBody) && errorBody.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        var errorJson = JObject.Parse(errorBody);
+                        var errorCode = errorJson["error"]?["code"]?.ToString();
+                        var errorMessage = errorJson["error"]?["message"]?.ToString();
+
+                        if (!string.IsNullOrEmpty(errorCode))
+                        {
+                            return $"Status: {response.StatusCode}, Code: {errorCode}, Message: {errorMessage ?? "N/A"}";
+                        }
+                    }
+                    catch
+                    {
+                        // Fall through to return raw body
+                    }
+                }
+
                 return $"Status: {response.StatusCode}, Body: {errorBody}";
             }
-            catch
+            catch (Exception ex)
             {
-                return $"Status: {response.StatusCode}";
+                return $"Status: {response?.StatusCode ?? 0}, Error reading response: {ex.Message}";
             }
         }
 
