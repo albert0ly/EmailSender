@@ -62,12 +62,17 @@ namespace MailSenderLib.Services
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
             IHttpClientFactory httpClientFactory,
+            GraphMailOptions? options=null,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
             _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient(HttpClientName);
+            if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
+            {
+                _httpClient.Timeout = options.HttpClientTimeout.Value;
+            }
             _ownsHttpClient = false; // Never own HttpClient from factory
             _retryPolicy = CreateRetryPolicy();
         }
@@ -85,12 +90,17 @@ namespace MailSenderLib.Services
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
             HttpClient httpClient,
+            GraphMailOptions? options = null,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
+            {
+                _httpClient.Timeout = options.HttpClientTimeout.Value;
+            }
             _ownsHttpClient = false; // Don't own injected HttpClient
             _retryPolicy = CreateRetryPolicy();
         }
@@ -107,12 +117,17 @@ namespace MailSenderLib.Services
         /// </remarks>
         public GraphMailSender(
             GraphMailOptionsAuth optionsAuth,
+            GraphMailOptions? options = null,
             ILogger<GraphMailSender>? logger = null)
         {
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
             _httpClient = new HttpClient();
+            if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
+            {
+                _httpClient.Timeout = options.HttpClientTimeout.Value;
+            }
             _ownsHttpClient = true; // We own this one
             _retryPolicy = CreateRetryPolicy();
         }
@@ -292,6 +307,8 @@ namespace MailSenderLib.Services
             bool isHtml = true,
             List<EmailAttachment>? attachments = null,
             string? fromEmail = null,
+            string? correlationId = null,
+            GraphMailOptions? options = null,
             CancellationToken ct = default)
         {
             bool draftCreated = false;
@@ -303,6 +320,11 @@ namespace MailSenderLib.Services
 
             try
             {
+                if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
+                {
+                    _httpClient.Timeout = options.HttpClientTimeout.Value;
+                }
+
                 if (toRecipients == null || !(toRecipients.Count > 0))
                     throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
@@ -692,26 +714,34 @@ namespace MailSenderLib.Services
                         {
                             ct.ThrowIfCancellationRequested();
 
-                            int bytesRead = await fs.ReadAsync(buffer, 0, Math.Min(buffer.Length, (int)(fileSize - offset)), ct);
 
-                            if (bytesRead <= 0)
+                            int bytesToRead = Math.Min(buffer.Length, (int)(fileSize - offset));
+                            int totalBytesRead = 0;
+
+                            while (totalBytesRead < bytesToRead)
                             {
-                                throw new GraphMailAttachmentException(
+                                int bytesRead = await fs.ReadAsync(
+                                    buffer, totalBytesRead, bytesToRead - totalBytesRead, ct);
+
+                                if (bytesRead == 0)
+                                    throw new GraphMailAttachmentException(
                                     $"Unexpected end of file while uploading '{fileName}'. " +
                                     $"Expected to read from offset {offset} but file stream returned {bytesRead} bytes. " +
                                     $"File size: {fileSize}, bytes uploaded: {offset}");
+
+                                totalBytesRead += bytesRead;
                             }
 
-                            long end = offset + bytesRead - 1;
+                            long end = offset + totalBytesRead - 1;
 
                             // Note: uploadUrl from Graph API is pre-authenticated, so we don't need to set Authorization header
                             var response = await SendWithRetryAsync(() =>
                             {
                                 var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl);
-                                var content = new ByteArrayContent(buffer, 0, bytesRead);
+                                var content = new ByteArrayContent(buffer, 0, totalBytesRead);
                                 req.Content = content;
                                 req.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-                                req.Content.Headers.ContentLength = bytesRead;
+                                req.Content.Headers.ContentLength = totalBytesRead;
                                 req.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, fileSize);
                                 return req;
                             }, ct).ConfigureAwait(false);
