@@ -625,6 +625,11 @@ namespace MailSenderLib.Services
                                 cleanAtt["contentBytes"] = att["contentBytes"];
                             if (att["size"] != null)
                                 cleanAtt["size"] = att["size"];
+                            if (att["isInline"] != null)
+                                cleanAtt["isInline"] = att["isInline"];
+                            if (att["contentId"] != null)
+                                cleanAtt["contentId"] = att["contentId"];
+
                             cleanAttachments.Add(cleanAtt);
                         }
                     }
