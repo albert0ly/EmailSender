@@ -16,27 +16,27 @@ namespace MailSenderLib.Models
     }
 
     // Strongly-typed payload classes for better performance and type safety
-    public sealed class MessagePayload
+    public sealed class Message
     {
         public string? Subject { get; set; }
-        public BodyPayload? Body { get; set; }
-        public List<RecipientPayload>? ToRecipients { get; set; }
-        public List<RecipientPayload>? CcRecipients { get; set; }
-        public List<RecipientPayload>? BccRecipients { get; set; }
+        public Body? Body { get; set; }
+        public List<Recipient>? ToRecipients { get; set; }
+        public List<Recipient>? CcRecipients { get; set; }
+        public List<Recipient>? BccRecipients { get; set; }
     }
 
-    public sealed class BodyPayload
+    public sealed class Body
     {
         public string ContentType { get; set; } = string.Empty;
         public string Content { get; set; } = string.Empty;
     }
 
-    public sealed class RecipientPayload
+    public sealed class Recipient
     {
-        public EmailAddressPayload? EmailAddress { get; set; }
+        public EmailAddress? EmailAddress { get; set; }
     }
 
-    public sealed class EmailAddressPayload
+    public sealed class EmailAddress
     {
         public string Address { get; set; } = string.Empty;
     }

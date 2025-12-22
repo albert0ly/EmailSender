@@ -361,30 +361,30 @@ namespace MailSenderLib.Services
 
                     var messageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages";
 
-                    var message = new MessagePayload
+                    var message = new Message
                     {
                         Subject = subject,
-                        Body = new BodyPayload
+                        Body = new Body
                         {
                             ContentType = isHtml ? "HTML" : "Text",
                             Content = body
                         },
-                        ToRecipients = toRecipients.Select(email => new RecipientPayload
+                        ToRecipients = toRecipients.Select(email => new Recipient
                         {
-                            EmailAddress = new EmailAddressPayload { Address = email }
+                            EmailAddress = new EmailAddress { Address = email }
                         }).ToList()
                     };
 
                     if (ccRecipients?.Count > 0)
-                        message.CcRecipients = ccRecipients.Select(email => new RecipientPayload
+                        message.CcRecipients = ccRecipients.Select(email => new Recipient
                         {
-                            EmailAddress = new EmailAddressPayload { Address = email }
+                            EmailAddress = new EmailAddress { Address = email }
                         }).ToList();
 
                     if (bccRecipients?.Count > 0)
-                        message.BccRecipients = bccRecipients.Select(email => new RecipientPayload
+                        message.BccRecipients = bccRecipients.Select(email => new Recipient
                         {
-                            EmailAddress = new EmailAddressPayload { Address = email }
+                            EmailAddress = new EmailAddress { Address = email }
                         }).ToList();
 
                     var messageJson = JsonConvert.SerializeObject(message, new JsonSerializerSettings
