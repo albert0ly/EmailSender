@@ -45,6 +45,7 @@ namespace MailSenderLib.Services
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
         private static readonly FileExtensionContentTypeProvider _provider = new FileExtensionContentTypeProvider();
         private const string HttpClientName = "GraphMailSender";
+        private int _disposed;
 
         // Centralized Polly retry policy
         private readonly AsyncPolicy<HttpResponseMessage> _retryPolicy;
@@ -319,6 +320,9 @@ namespace MailSenderLib.Services
             var sw = Stopwatch.StartNew();
             IDisposable? scope = null;
 
+            if (Volatile.Read(ref _disposed) == 1)
+                throw new ObjectDisposedException(nameof(GraphMailSender));
+
             var effectiveCorrelationId =
                 correlationId
                 ?? Activity.Current?.Id
@@ -483,11 +487,7 @@ namespace MailSenderLib.Services
                     JObject completeMessage;
                     using (var stream = await getResponse.Content.ReadAsStreamAsync().ConfigureAwait(false))
                     using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192))
-                    using (var jsonReader = new JsonTextReader(streamReader)
-                    {
-                        // Use ArrayPool to reduce memory allocations during JSON parsing
-                        //ArrayPool = JsonArrayPool.Instance
-                    })
+                    using (var jsonReader = new JsonTextReader(streamReader))
                     {
                         var serializer = new JsonSerializer();
                         completeMessage = serializer.Deserialize<JObject>(jsonReader)
@@ -917,6 +917,9 @@ namespace MailSenderLib.Services
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) == 1)
+                return;
+
             // Only dispose HttpClient if we own it (created it, not injected)
             if (_ownsHttpClient)
             {
