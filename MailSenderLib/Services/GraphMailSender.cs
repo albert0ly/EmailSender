@@ -329,8 +329,7 @@ namespace MailSenderLib.Services
                 ?? Guid.NewGuid().ToString("N");
 
             if (_logger != null)
-            {
-                //scope = _logger.BeginScope(new { CorrelationId = effectiveCorrelationId });
+            {             
                 scope = _logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = effectiveCorrelationId });
             }
 
@@ -436,6 +435,11 @@ namespace MailSenderLib.Services
                                 throw new GraphMailAttachmentException($"Attachment file is empty: {attachment.FileName}");
                             }
 
+                            if (attachment.IsInline && string.IsNullOrWhiteSpace(attachment.ContentId))
+                            {
+                                throw new ArgumentException($"Inline attachment {attachment.FileName} must have a ContentId");
+                            }
+
                             totalSize += fileInfo.Length;
                         }
 
@@ -455,11 +459,15 @@ namespace MailSenderLib.Services
                             _logger?.LogAttachingFile(attachment.FileName, fileSize);
                             if (fileSize > LargeAttachmentThreshold) // > 3MB
                             {
-                                await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, fileSize, contentType, ct).ConfigureAwait(false);
+                                await UploadLargeAttachmentStreamAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, 
+                                                                       fileSize, contentType, attachment.IsInline, 
+                                                                       attachment.ContentId ?? string.Empty, ct).ConfigureAwait(false);
                             }
                             else
                             {
-                                await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath, contentType, ct).ConfigureAwait(false);
+                                await AddSmallAttachmentAsync(userEncoded, messageId, attachment.FileName, attachment.FilePath,
+                                                              contentType, attachment.IsInline,
+                                                              attachment.ContentId ?? string.Empty, ct).ConfigureAwait(false);
                             }
                         }
                     }
@@ -641,7 +649,7 @@ namespace MailSenderLib.Services
         }
 
         private async Task AddSmallAttachmentAsync(string fromEmail, string messageId,
-            string fileName, string filePath, string contentType, CancellationToken ct)
+            string fileName, string filePath, string contentType, bool isInline, string? contentId, CancellationToken ct)
         {
             fileName = fileName.SanitizeFilename();
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
@@ -653,7 +661,9 @@ namespace MailSenderLib.Services
                 odataType = "#microsoft.graph.fileAttachment",
                 name = fileName,
                 contentType,
-                contentBytes = base64Content
+                contentBytes = base64Content,
+                isInline,
+                contentId  // Will be null if not inline
             };
 
             var json = JsonConvert.SerializeObject(attachment, new JsonSerializerSettings
@@ -684,7 +694,7 @@ namespace MailSenderLib.Services
         private async Task UploadLargeAttachmentStreamAsync(
             string fromEmail, string messageId, string fileName,
             string filePath, long fileSize, string contentType,
-            CancellationToken ct)
+            bool isInline, string? contentId, CancellationToken ct)
         {
             fileName = fileName.SanitizeFilename();
             const int maxSessionRetries = 3;
@@ -700,7 +710,9 @@ namespace MailSenderLib.Services
                         {
                             attachmentType = "file",
                             name = fileName,
-                            size = fileSize
+                            size = fileSize,
+                            isInline,  
+                            contentId // an be null if not inline
                         }
                     };
                     var sessionJson = JsonConvert.SerializeObject(sessionData);

@@ -79,7 +79,7 @@ namespace MailSenderLib.Utils
             sanitizer.AllowedSchemes.Add("http");
             sanitizer.AllowedSchemes.Add("https");
             sanitizer.AllowedSchemes.Add("data"); // inline base64 images
-
+            sanitizer.AllowedSchemes.Add("cid"); // REQUIRED for inline email images
             return sanitizer;
         }
 
