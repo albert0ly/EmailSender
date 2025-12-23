@@ -359,7 +359,34 @@ namespace MailSenderLib.Services
                         throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
                     fromEmail ??= _optionsAuth.MailboxAddress;
+                    if (!EmailValidator.IsValidEmail(fromEmail))
+                              throw new ArgumentException("'From' email address is not valid", nameof(fromEmail));
+
                     userEncoded = Uri.EscapeDataString(fromEmail);
+
+                    List<string> invalidRecipients = toRecipients.Where(email => !EmailValidator.IsValidEmail(email)).ToList();
+                    if (invalidRecipients.Count > 0)
+                        throw new ArgumentException(
+                            $"Invalid email addresses: {string.Join(", ", invalidRecipients)}",
+                            nameof(toRecipients));
+
+                    if (ccRecipients != null && ccRecipients.Count > 0)
+                    {
+                        List<string> invalidCc = ccRecipients.Where(email => !EmailValidator.IsValidEmail(email)).ToList();
+                        if (invalidCc.Count > 0)
+                            throw new ArgumentException(
+                                $"Invalid CC email addresses: {string.Join(", ", invalidCc)}",
+                                nameof(ccRecipients));
+                    }
+
+                    if (bccRecipients != null && bccRecipients.Count > 0)
+                    {
+                        List<string> invalidBcc = bccRecipients.Where(email => !EmailValidator.IsValidEmail(email)).ToList();
+                        if (invalidBcc.Count > 0)
+                            throw new ArgumentException(
+                                $"Invalid BCC email addresses: {string.Join(", ", invalidBcc)}",
+                                nameof(bccRecipients));
+                    }
 
                     _logger?.LogSendingEmail(fromEmail, toRecipients.Count);
 
@@ -405,7 +432,7 @@ namespace MailSenderLib.Services
                     // Step 1: Create draft message
                     var messageResponse = await SendWithRetryAsync(async () =>
                     {
-                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);  // ✅ Fresh token each attempt
+                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false); 
                         var req = new HttpRequestMessage(HttpMethod.Post, messageUrl);
                         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                         req.Content = new StringContent(messageJson, Encoding.UTF8, "application/json");
@@ -746,7 +773,7 @@ namespace MailSenderLib.Services
 
                     var sessionBody = await sessionResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
                     var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
-                        ?? throw new GraphMailAttachmentException("uploadUrl not found");
+                        ?? throw new GraphMailAttachmentException($"uploadUrl not found for '{fileName}'");
 
                     _logger?.LogUploadSessionUrl(uploadUrl.StripAfter('?'), fileName, sessionAttempt+1, maxSessionRetries, messageId);                    
 
