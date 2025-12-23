@@ -18,7 +18,6 @@ namespace MailSenderLib.Interfaces
                             List<EmailAttachment>? attachments=null,
                             string? fromEmail = null,
                             string? correlationId = null,
-                            GraphMailOptions? options = null,
                             CancellationToken ct = default);
     }
 }

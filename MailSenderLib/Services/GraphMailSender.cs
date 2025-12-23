@@ -35,8 +35,8 @@ namespace MailSenderLib.Services
     public class GraphMailSender : IDisposable, IGraphMailSender
     {
         private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
-        private const int ChunkSize = 5 * 1024 * 1024; // 5MB
-        private const long MaxTotalAttachmentSize = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
+        private const int ChunkSize = 5 * 1024 * 1024; // 5MB        
+        private long MaxTotalAttachmentSize { get; set; } = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
         private readonly GraphMailOptionsAuth _optionsAuth;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
@@ -44,7 +44,6 @@ namespace MailSenderLib.Services
         private readonly bool _ownsHttpClient;
         private static readonly string[] scopes = { "https://graph.microsoft.com/.default" };
         private static readonly FileExtensionContentTypeProvider _provider = new FileExtensionContentTypeProvider();
-        private const string HttpClientName = "GraphMailSender";
         private int _disposed;
 
         // Centralized Polly retry policy
@@ -69,11 +68,12 @@ namespace MailSenderLib.Services
             _optionsAuth = optionsAuth ?? throw new ArgumentNullException(nameof(optionsAuth));
             _credential = new ClientSecretCredential(_optionsAuth.TenantId, _optionsAuth.ClientId, _optionsAuth.ClientSecret);
             _logger = logger;
-            _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient(HttpClientName);
+            _httpClient = (httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory))).CreateClient();
             if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
             {
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
+            MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
             _ownsHttpClient = false; // Never own HttpClient from factory
             _retryPolicy = CreateRetryPolicy();
         }
@@ -102,6 +102,7 @@ namespace MailSenderLib.Services
             {
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
+            MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
             _ownsHttpClient = false; // Don't own injected HttpClient
             _retryPolicy = CreateRetryPolicy();
         }
@@ -129,6 +130,7 @@ namespace MailSenderLib.Services
             {
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
+            MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
             _ownsHttpClient = true; // We own this one
             _retryPolicy = CreateRetryPolicy();
         }
@@ -158,6 +160,22 @@ namespace MailSenderLib.Services
                 }
             });
         }
+
+        private Task<HttpResponseMessage> SendWithRetryAsync(
+                        Func<Task<HttpRequestMessage>> requestFactory, 
+                        CancellationToken ct)
+        {
+            return _retryPolicy.ExecuteAsync(async () =>
+            {
+                using (var request = await requestFactory().ConfigureAwait(false))  // Await the factory
+                {
+                    return await _httpClient
+                        .SendAsync(request, ct)
+                        .ConfigureAwait(false);
+                }
+            });
+        }
+
         private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
         {
             return Policy<HttpResponseMessage>
@@ -309,13 +327,11 @@ namespace MailSenderLib.Services
             List<EmailAttachment>? attachments = null,
             string? fromEmail = null,
             string? correlationId = null,
-            GraphMailOptions? options = null,
             CancellationToken ct = default)
         {
             bool draftCreated = false;
             string messageId = string.Empty;
             Exception? originalException = null;
-            string token = string.Empty;
             string userEncoded = string.Empty;
             var sw = Stopwatch.StartNew();
             IDisposable? scope = null;
@@ -337,10 +353,7 @@ namespace MailSenderLib.Services
             {
                 try
                 {
-                    if (options?.HttpClientTimeout != null && options.HttpClientTimeout > TimeSpan.Zero)
-                    {
-                        _httpClient.Timeout = options.HttpClientTimeout.Value;
-                    }
+                    // ... validation code ...                   
 
                     if (toRecipients == null || !(toRecipients.Count > 0))
                         throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
@@ -352,9 +365,6 @@ namespace MailSenderLib.Services
 
                     body = EmailSanitizer.SanitizeBody(body);
                     subject = EmailSanitizer.SanitizeSubject(subject);
-
-                    // Fetch token on demand
-                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
                     _logger?.LogExecutionStep("Step 1: Create draft message", sw.ElapsedMilliseconds);
 
@@ -392,9 +402,10 @@ namespace MailSenderLib.Services
                         ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
                     });
 
-                    // Create draft
-                    var messageResponse = await SendWithRetryAsync(() =>
+                    // Step 1: Create draft message
+                    var messageResponse = await SendWithRetryAsync(async () =>
                     {
+                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);  // ✅ Fresh token each attempt
                         var req = new HttpRequestMessage(HttpMethod.Post, messageUrl);
                         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                         req.Content = new StringContent(messageJson, Encoding.UTF8, "application/json");
@@ -416,7 +427,7 @@ namespace MailSenderLib.Services
                     _logger?.LogDraftCreated(messageId);
                     draftCreated = true;
 
-                    // Attach files
+                    // Step 2: Attach files
                     _logger?.LogExecutionStep("Step 2: Attach files", sw.ElapsedMilliseconds);
                     if (attachments?.Count > 0)
                     {
@@ -472,12 +483,12 @@ namespace MailSenderLib.Services
                         }
                     }
 
-                    // Get full message with attachments
+                    // Step 3: Get the complete message with attachments
                     _logger?.LogExecutionStep("Step 3: Get the complete message with attachments", sw.ElapsedMilliseconds);
                     var getMessageUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}?$expand=attachments";
-                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                    var getResponse = await SendWithRetryAsync(() =>
+                    var getResponse = await SendWithRetryAsync(async () =>
                     {
+                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);  
                         var req = new HttpRequestMessage(HttpMethod.Get, getMessageUrl);
                         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                         return req;
@@ -505,7 +516,7 @@ namespace MailSenderLib.Services
                     // Remove read-only fields
                     var cleanMessage = CleanMessageForSending(completeMessage);
 
-                    // Send mail
+                    // Step 4: Send using sendMail endpoint
                     _logger?.LogExecutionStep("Step 4: Send using sendMail endpoint", sw.ElapsedMilliseconds);
                     var sendUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/sendMail";
                     var sendPayload = new
@@ -513,12 +524,11 @@ namespace MailSenderLib.Services
                         message = cleanMessage,
                         saveToSentItems = false
                     };
-
                     var sendJson = JsonConvert.SerializeObject(sendPayload);
-                    token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
-                    var sendResponse = await SendWithRetryAsync(() =>
+                    var sendResponse = await SendWithRetryAsync(async () =>
                     {
+                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);  // Fresh token
                         var req = new HttpRequestMessage(HttpMethod.Post, sendUrl);
                         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                         req.Content = new StringContent(sendJson, Encoding.UTF8, "application/json");
@@ -543,17 +553,18 @@ namespace MailSenderLib.Services
                 }
                 finally
                 {
+                    // Step 5: Delete the draft message
                     _logger?.LogExecutionStep("Step 5: Delete the draft message if it was created", sw.ElapsedMilliseconds);
                     if (draftCreated && !string.IsNullOrEmpty(messageId))
                     {
                         try
                         {
                             var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{userEncoded}/messages/{messageId}";
-                            var tokenForDelete = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-                            var deleteResponse = await SendWithRetryAsync(() =>
+                            var deleteResponse = await SendWithRetryAsync(async () =>
                             {
+                                var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);  
                                 var req = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
-                                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenForDelete);
+                                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                                 return req;
                             }, ct).ConfigureAwait(false);
 
@@ -671,9 +682,9 @@ namespace MailSenderLib.Services
                 ContractResolver = new ODataContractResolver()
             });
 
-            var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
-            var response = await SendWithRetryAsync(() =>
+            var response = await SendWithRetryAsync(async () =>  
             {
+                var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                 var req = new HttpRequestMessage(HttpMethod.Post, attachUrl);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 req.Content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -716,10 +727,10 @@ namespace MailSenderLib.Services
                         }
                     };
                     var sessionJson = JsonConvert.SerializeObject(sessionData);
-                    var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
 
-                    var sessionResponse = await SendWithRetryAsync(() =>
+                    var sessionResponse = await SendWithRetryAsync(async () =>
                     {
+                        var token = await GetAccessTokenAsync(ct).ConfigureAwait(false);
                         var req = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
                         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                         req.Content = new StringContent(sessionJson, Encoding.UTF8, "application/json");
