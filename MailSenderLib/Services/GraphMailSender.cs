@@ -9,12 +9,10 @@ using MailSenderLib.Models;
 using MailSenderLib.Options;
 using MailSenderLib.Utils;
 using Microsoft.AspNetCore.StaticFiles;
-using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Polly;
-using Polly.Contrib.WaitAndRetry;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -25,7 +23,6 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Mime;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,6 +31,8 @@ namespace MailSenderLib.Services
 {
     public class GraphMailSender : IDisposable, IGraphMailSender
     {
+        private const int JsonStreamBufferSize = 8192;
+        private const int FileStreamBufferSize = 4096;
         private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
         private const int ChunkSize = 5 * 1024 * 1024; // 5MB        
         private long MaxTotalAttachmentSize { get; set; } = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
@@ -177,7 +176,7 @@ namespace MailSenderLib.Services
         }
 
         private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
-        {
+        {            
             return Policy<HttpResponseMessage>
                 .Handle<HttpRequestException>()
                 .Or<TaskCanceledException>()
@@ -354,7 +353,6 @@ namespace MailSenderLib.Services
                 try
                 {
                     // ... validation code ...                   
-
                     if (toRecipients == null || !(toRecipients.Count > 0))
                         throw new ArgumentException("At least one recipient is required", nameof(toRecipients));
 
@@ -532,7 +530,7 @@ namespace MailSenderLib.Services
                     // This is critical for large attachments with base64-encoded contentBytes
                     JObject completeMessage;
                     using (var stream = await getResponse.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                    using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192))
+                    using (var streamReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: JsonStreamBufferSize))
                     using (var jsonReader = new JsonTextReader(streamReader))
                     {
                         var serializer = new JsonSerializer();
@@ -775,14 +773,14 @@ namespace MailSenderLib.Services
                     var uploadUrl = JObject.Parse(sessionBody)["uploadUrl"]?.ToString()
                         ?? throw new GraphMailAttachmentException($"uploadUrl not found for '{fileName}'");
 
-                    _logger?.LogUploadSessionUrl(uploadUrl.StripAfter('?'), fileName, sessionAttempt+1, maxSessionRetries, messageId);                    
+                    _logger?.LogUploadSessionUrl(uploadUrl.StripAfter('?'), fileName, sessionAttempt + 1, maxSessionRetries, messageId);                    
 
                     var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
                     long offset = 0;
 
                     try
                     {
-                        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
+                        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileStreamBufferSize, true);
                         while (offset < fileSize)
                         {
                             ct.ThrowIfCancellationRequested();
