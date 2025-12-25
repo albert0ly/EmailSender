@@ -36,6 +36,11 @@ namespace MailSenderLib.Models
         public string? ContentBase64 { get; set; }
 
         /// <summary>
+        /// ID for In-Line attachments (when retrieved).
+        /// </summary>
+        public string? ContentId { get; set; }
+
+        /// <summary>
         /// Returns a friendly string for UI lists.
         /// </summary>
         public override string ToString() => Name ?? Id;

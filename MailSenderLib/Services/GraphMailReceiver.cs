@@ -1,6 +1,7 @@
 using Azure.Core;
 using Azure.Identity;
 using MailSenderLib.Models;
+using MailSenderLib.Options;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 using System;
@@ -88,7 +89,7 @@ namespace MailSenderLib.Services
         }
 
         /// <inheritdoc />
-        public async Task<List<MailMessageDto>> ReceiveEmailsAsync(string? mailbox, CancellationToken ct = default)
+        public async Task<List<MailMessageDto>> ReceiveEmailsAsync(string? mailbox, GraphMailReceiverOptions options, CancellationToken ct = default)
         {
             var user = string.IsNullOrWhiteSpace(mailbox) ? _options.MailboxAddress : mailbox!;
             if (string.IsNullOrWhiteSpace(user)) throw new ArgumentException("Mailbox must be provided.", nameof(mailbox));
@@ -101,7 +102,7 @@ namespace MailSenderLib.Services
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
             var select = "id,subject,body,receivedDateTime,isRead,hasAttachments,webLink,toRecipients,ccRecipients,bccRecipients,internetMessageHeaders";
-            var url = $"users/{Uri.EscapeDataString(user)}/mailFolders/inbox/messages?$filter=isRead eq false&$select={Uri.EscapeDataString(select)}&$top=100";
+            var url = $"users/{Uri.EscapeDataString(user)}/mailFolders/inbox/messages?$filter=isRead eq false&$select={Uri.EscapeDataString(select)}&$top={options.MaxMessagesToFetch}";
 
             var resp = await http.GetAsync(url, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
@@ -205,51 +206,53 @@ namespace MailSenderLib.Services
                 }
 
                 // attachments
-                if (msg.HasAttachments == true)
+                try
                 {
-                    try
+                    var attUrl = $"users/{Uri.EscapeDataString(user)}/messages/{Uri.EscapeDataString(id)}/attachments";
+                    var attResp = await http.GetAsync(attUrl, ct).ConfigureAwait(false);
+                    if (attResp.IsSuccessStatusCode)
                     {
-                        var attUrl = $"users/{Uri.EscapeDataString(user)}/messages/{Uri.EscapeDataString(id)}/attachments";
-                        var attResp = await http.GetAsync(attUrl, ct).ConfigureAwait(false);
-                        if (attResp.IsSuccessStatusCode)
+                        var attJson = await attResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var attRoot = JObject.Parse(attJson);
+                        var attArray = attRoot.Value<JArray>("value");
+                        if (attArray != null)
                         {
-                            var attJson = await attResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                            var attRoot = JObject.Parse(attJson);
-                            var attArray = attRoot.Value<JArray>("value");
-                            if (attArray != null)
+                            foreach (var a in attArray)
                             {
-                                foreach (var a in attArray)
+                                var adto = new MailAttachmentDto
                                 {
-                                    var adto = new MailAttachmentDto
-                                    {
-                                        Id = a.Value<string>("id") ?? string.Empty,
-                                        Name = a.Value<string>("name"),
-                                        ContentType = a.Value<string>("contentType") ?? a.SelectToken("@odata.mediaContentType")?.ToString(),
-                                        Size = a.Value<long?>("size"),
-                                        IsInline = a.Value<bool?>("isInline")
-                                    };
+                                    Id = a.Value<string>("id") ?? string.Empty,
+                                    Name = a.Value<string>("name"),
+                                    ContentType = a.Value<string>("contentType") ?? a.SelectToken("@odata.mediaContentType")?.ToString(),
+                                    Size = a.Value<long?>("size"),
+                                    IsInline = a.Value<bool?>("isInline"),
+                                    ContentId = a.Value<string?>("contentId")
+                                };
 
-                                    var contentBytes = a.Value<string>("contentBytes");
-                                    if (!string.IsNullOrEmpty(contentBytes))
-                                    {
-                                        // contentBytes is base64 string already
-                                        adto.ContentBase64 = contentBytes;
-                                    }
-
-                                    msg.Attachments.Add(adto);
+                                var contentBytes = a.Value<string>("contentBytes");
+                                if (!string.IsNullOrEmpty(contentBytes))
+                                {
+                                    // contentBytes is base64 string already
+                                    adto.ContentBase64 = contentBytes;
                                 }
+
+                                msg.HasAttachments = true;
+
+                                msg.Attachments.Add(adto);
                             }
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        if (_logger != null) _logFailedToFetchAttachments(_logger, id, ex);
-                        // ignore attachment fetch errors per-message
-                    }
                 }
+                catch (Exception ex)
+                {
+                    if (_logger != null) _logFailedToFetchAttachments(_logger, id, ex);
+                    // ignore attachment fetch errors per-message
+                }
+                
+
 
                 // mark as read
-                if (msg.IsRead != true)
+                if (options.MarkAsRead && msg.IsRead != true)
                 {
                     try
                     {

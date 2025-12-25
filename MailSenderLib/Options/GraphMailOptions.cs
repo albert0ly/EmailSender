@@ -10,6 +10,14 @@ namespace MailSenderLib.Options
         public string MailboxAddress { get; set; } = string.Empty;
     }
 
+    public class GraphMailReceiverOptions
+    {
+#pragma warning disable CA1805 // Do not initialize unnecessarily
+        public bool MarkAsRead { get; set; } = false;
+#pragma warning restore CA1805 // Do not initialize unnecessarily
+        public int MaxMessagesToFetch { get; set; } = 100;
+    }
+
 
     public class GraphMailOptions
     {

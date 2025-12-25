@@ -31,6 +31,7 @@ namespace MailSenderLibTester
         private TabPage _tabReceive;
         private TextBox _txtRecvMailbox;
         private Button _btnGet;
+        private Button _btnCommit;
         private DataGridView _dgvMessages;
         private TextBox _txtDetailsSubject;
         private TextBox _txtDetailsBody;
@@ -123,10 +124,13 @@ namespace MailSenderLibTester
             _btnGet = new Button { Text = "Get", Left = x + 310, Top = y - 2, Width = 80 };
             _btnGet.Click += BtnGet_Click;
 
-            _lblRecvStatus = new Label { Text = "", Left = x + 400, Top = y + 3, AutoSize = true };
+            _btnCommit = new Button { Text = "Commit", Left = x + 400, Top = y - 2, Width = 80 };
+            _btnCommit.Click += btnCommit_Click;
+            _lblRecvStatus = new Label { Text = "", Left = x + 490, Top = y + 3, AutoSize = true };
 
             _tabReceive.Controls.Add(_txtRecvMailbox);
             _tabReceive.Controls.Add(_btnGet);
+            _tabReceive.Controls.Add(_btnCommit);
             _tabReceive.Controls.Add(_lblRecvStatus);
 
             y += 30;
@@ -180,13 +184,18 @@ namespace MailSenderLibTester
             };
         }
 
+        private void btnCommit_Click(object sender, EventArgs e)
+        {
+            throw new NotImplementedException();
+        }
+
         private async void BtnGet_Click(object sender, EventArgs e)
         {
             _btnGet.Enabled = false;
             _lblRecvStatus.Text = "Fetching...";
             try
             {
-                var options = new GraphMailOptionsAuth
+                var optionsAuth = new GraphMailOptionsAuth
                 {
                     TenantId = txtTenant != null ? txtTenant.Text.Trim() : string.Empty,
                     ClientId = txtClientId != null ? txtClientId.Text.Trim() : string.Empty,
@@ -194,8 +203,13 @@ namespace MailSenderLibTester
                     MailboxAddress = txtMailbox != null ? txtMailbox.Text.Trim() : string.Empty
                 };
 
-                var receiver = new GraphMailReceiver(options);
-                var list = await receiver.ReceiveEmailsAsync(_txtRecvMailbox.Text.Trim(), CancellationToken.None);
+                var options = new GraphMailReceiverOptions
+                {
+                    MarkAsRead = false,        
+                    MaxMessagesToFetch = 50,
+                };
+                var receiver = new GraphMailReceiver(optionsAuth);
+                var list = await receiver.ReceiveEmailsAsync(_txtRecvMailbox.Text.Trim(), options, CancellationToken.None);
 
                 _dgvMessages.DataSource = list;
                 _lblRecvStatus.Text = string.Format("{0} messages", list.Count);
@@ -435,5 +449,9 @@ namespace MailSenderLibTester
             lblCount.Text = "0";
         }
 
+        private void MainForm_Load(object sender, EventArgs e)
+        {
+
+        }
     }
 }

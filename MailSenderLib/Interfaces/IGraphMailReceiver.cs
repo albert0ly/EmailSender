@@ -1,4 +1,5 @@
 using MailSenderLib.Models;
+using MailSenderLib.Options;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,6 +11,6 @@ namespace MailSenderLib.Interfaces
     /// </summary>
     public interface IGraphMailReceiver
     {
-        Task<List<MailMessageDto>> ReceiveEmailsAsync(string? mailbox, CancellationToken ct = default);
+        Task<List<MailMessageDto>> ReceiveEmailsAsync(string? mailbox, GraphMailReceiverOptions options, CancellationToken ct = default);
     }
 }

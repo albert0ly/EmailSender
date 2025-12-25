@@ -316,6 +316,7 @@ namespace MailSenderLibTester
             this.Controls.Add(this.lblTenant);
             this.Name = "MainForm";
             this.Text = "MailSenderLib Tester";
+            this.Load += new System.EventHandler(this.MainForm_Load);
             this.ResumeLayout(false);
             this.PerformLayout();
 
