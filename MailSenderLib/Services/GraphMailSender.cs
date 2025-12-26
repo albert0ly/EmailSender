@@ -33,7 +33,7 @@ namespace MailSenderLib.Services
     public class GraphMailSender : IDisposable, IGraphMailSender
     {
         private const int JsonStreamBufferSize = 8192;
-        private const int FileStreamBufferSize = 4096;
+        private const int FileStreamBufferSize = 8192;
         private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
         private const int ChunkSize = 5 * 1024 * 1024; // 5MB        
         private long MaxTotalAttachmentSize { get; set; } = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
@@ -694,9 +694,9 @@ namespace MailSenderLib.Services
         {
             fileName = fileName.SanitizeFilename();
             var attachUrl = $"https://graph.microsoft.com/v1.0/users/{fromEmail}/messages/{messageId}/attachments";
-            var fileBytes = await filePath.ReadAllBytesAsync(ct).ConfigureAwait(false);
-            var base64Content = Convert.ToBase64String(fileBytes);
 
+            var base64Content = await filePath.StreamFileAsBase64Async(ct).ConfigureAwait(false);
+            
             var attachment = new
             {
                 odataType = "#microsoft.graph.fileAttachment",
