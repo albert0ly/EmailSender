@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Polly;
+using Polly.Contrib.WaitAndRetry;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -176,7 +177,11 @@ namespace MailSenderLib.Services
         }
 
         private AsyncPolicy<HttpResponseMessage> CreateRetryPolicy()
-        {            
+        {
+            // Pre-generate jittered delays (Polly recommends doing this once)
+            var jitterDelays = Backoff.DecorrelatedJitterBackoffV2( medianFirstRetryDelay: TimeSpan.FromSeconds(1),
+                                                                    retryCount: 5).ToArray();
+
             return Policy<HttpResponseMessage>
                 .Handle<HttpRequestException>()
                 .Or<TaskCanceledException>()
@@ -188,15 +193,15 @@ namespace MailSenderLib.Services
                     retryCount: 5,
                     sleepDurationProvider: (retryAttempt, outcome, context) =>
                     {
-                        // HONOR Retry-After (this is the important part)
+                        // 1️. Honor Retry-After header if present
                         var response = outcome.Result;
                         if (response?.Headers?.RetryAfter?.Delta != null)
                         {
                             return response.Headers.RetryAfter.Delta.Value;
                         }
 
-                        // fallback exponential backoff
-                        return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt));
+                        // 2️. Otherwise use jittered backoff
+                        return jitterDelays[retryAttempt - 1];
                     },
                     onRetryAsync: async (outcome, delay, retryAttempt, context) =>
                     {
