@@ -33,10 +33,8 @@ namespace MailSenderLib.Services
     public class GraphMailSender : IDisposable, IGraphMailSender
     {
         private const int JsonStreamBufferSize = 8192;
-        private const int FileStreamBufferSize = 8192;
-        private const long LargeAttachmentThreshold = 3 * 1024 * 1024; // 3MB
+        private const int FileStreamBufferSize = 8192;       
         private const int ChunkSize = 5 * 1024 * 1024; // 5MB        
-        private long MaxTotalAttachmentSize { get; set; } = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
         private readonly GraphMailOptionsAuth _optionsAuth;
         private readonly ClientSecretCredential _credential;
         private readonly ILogger<GraphMailSender>? _logger;
@@ -48,6 +46,9 @@ namespace MailSenderLib.Services
 
         // Centralized Polly retry policy
         private readonly AsyncPolicy<HttpResponseMessage> _retryPolicy;
+
+        private long MaxTotalAttachmentSize { get; set; } = 35 * 1024 * 1024; // 35MB - protect against memory issues with huge attachments
+        private long LargeAttachmentThreshold { get; set; } = 3 * 1024 * 1024; // 3MB
 
         /// <summary>
         /// Initializes a new instance of the GraphMailSender class using IHttpClientFactory (recommended).
@@ -74,6 +75,7 @@ namespace MailSenderLib.Services
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
             MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
+            LargeAttachmentThreshold = options?.LargeAttachmentThreshold ?? LargeAttachmentThreshold;
             _ownsHttpClient = false; // Never own HttpClient from factory
             _retryPolicy = CreateRetryPolicy();
         }
@@ -103,6 +105,7 @@ namespace MailSenderLib.Services
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
             MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
+            LargeAttachmentThreshold = options?.LargeAttachmentThreshold ?? LargeAttachmentThreshold;
             _ownsHttpClient = false; // Don't own injected HttpClient
             _retryPolicy = CreateRetryPolicy();
         }
@@ -131,6 +134,7 @@ namespace MailSenderLib.Services
                 _httpClient.Timeout = options.HttpClientTimeout.Value;
             }
             MaxTotalAttachmentSize = options?.MaxTotalAttachmentSize ?? MaxTotalAttachmentSize;
+            LargeAttachmentThreshold = options?.LargeAttachmentThreshold ?? LargeAttachmentThreshold;
             _ownsHttpClient = true; // We own this one
             _retryPolicy = CreateRetryPolicy();
         }
@@ -159,12 +163,12 @@ namespace MailSenderLib.Services
         {
             return _retryPolicy.ExecuteAsync(async () =>
             {
-                using (var request = requestFactory())
-                {
-                    return await _httpClient
-                        .SendAsync(request, ct)
-                        .ConfigureAwait(false);
-                }
+                using var request = requestFactory();
+                
+                return await _httpClient
+                    .SendAsync(request, ct)
+                    .ConfigureAwait(false);
+                
             });
         }
 
@@ -174,12 +178,12 @@ namespace MailSenderLib.Services
         {
             return _retryPolicy.ExecuteAsync(async () =>
             {
-                using (var request = await requestFactory().ConfigureAwait(false))  // Await the factory
-                {
-                    return await _httpClient
-                        .SendAsync(request, ct)
-                        .ConfigureAwait(false);
-                }
+                using var request = await requestFactory().ConfigureAwait(false);  // Await the factory
+                
+                return await _httpClient
+                    .SendAsync(request, ct)
+                    .ConfigureAwait(false);
+                
             });
         }
 
