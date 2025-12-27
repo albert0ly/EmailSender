@@ -140,10 +140,17 @@ namespace MailSenderLib.Services
         /// </summary>
         private async Task<string> GetAccessTokenAsync(CancellationToken ct)
         {
-            // Simplified: rely on ClientSecretCredential built-in caching/refresh
-            var token = await _credential.GetTokenAsync(new TokenRequestContext(scopes), ct).ConfigureAwait(false);
-            //_logger?.LogTokenAcquired(token.ExpiresOn);
-            return token.Token;
+            try
+            {
+                var token = await _credential.GetTokenAsync(
+                    new TokenRequestContext(scopes), ct).ConfigureAwait(false);
+                return token.Token;
+            }
+            catch (AuthenticationFailedException ex)
+            {
+                _logger?.LogAuthenticationFailed(ex);
+                throw; // Rethrow - don't retry
+            }
         }
 
         private Task<HttpResponseMessage> SendWithRetryAsync(
@@ -449,7 +456,15 @@ namespace MailSenderLib.Services
                         throw new GraphMailFailedCreateMessageException($"Failed to create message: {error}");
                     }
 
-                    var messageResponseBody = await messageResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    // If targeting .NET 5+ or .NET Core 3.1+
+#if NET5_0_OR_GREATER
+                    var messageResponseBody = await messageResponse.Content
+                          .ReadAsStringAsync(ct).ConfigureAwait(false);
+#else
+                    var messageResponseBody = await messageResponse.Content
+                        .ReadAsStringAsync().ConfigureAwait(false);
+#endif
+
                     var createdMessage = JObject.Parse(messageResponseBody);
                     messageId = createdMessage["id"]?.ToString()
                         ?? throw new GraphMailFailedCreateMessageException($"Message ID not found in response: {messageResponseBody}");
@@ -739,6 +754,8 @@ namespace MailSenderLib.Services
         {
             fileName = fileName.SanitizeFilename();
             const int maxSessionRetries = 3;
+            var jitterDelays = Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromSeconds(1),
+                                                        retryCount: maxSessionRetries).ToArray();
 
             for (int sessionAttempt = 0; sessionAttempt < maxSessionRetries; sessionAttempt++)
             {
@@ -906,11 +923,11 @@ namespace MailSenderLib.Services
                             $"Draft message: {messageId}", ex);
                     }
 
-                    // Calculate exponential backoff delay: 1s, 2s, 4s
-                    var delaySeconds = Math.Pow(2, sessionAttempt);
-                    _logger?.LogSessionExpired(fileName, sessionAttempt+1, maxSessionRetries, delaySeconds, ex);
+                    // Calculate  backoff 
+                    var delaySeconds = jitterDelays[sessionAttempt];                   
+                    _logger?.LogSessionExpired(fileName, sessionAttempt+1, maxSessionRetries, delaySeconds.TotalSeconds, ex);
 
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
+                    await Task.Delay(delaySeconds, ct).ConfigureAwait(false);
 
                     // Loop continues - will create new session and retry
                 }

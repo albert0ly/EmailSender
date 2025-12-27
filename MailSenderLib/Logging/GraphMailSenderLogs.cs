@@ -97,6 +97,18 @@ namespace MailSenderLib.Logging
         internal static readonly Action<ILogger, string, string, Exception?> FailedToCreateUploadSession =
             LoggerMessage.Define<string, string>(LogLevel.Error, new EventId(1029, nameof(FailedToCreateUploadSession)),
                 "Failed to create upload session for '{FileName}': {Error}");
+
+        internal static readonly Action<ILogger, Exception?> AuthenticationFailed =
+            LoggerMessage.Define(LogLevel.Error, new EventId(1030, nameof(AuthenticationFailed)),
+                "Authentication failed. Check ClientId, ClientSecret, and TenantId");
+
+
+        //[LoggerMessage(
+        //        EventId = ...,
+        //        Level = LogLevel.Error,
+        //        Message = "Authentication failed. Check ClientId, ClientSecret, and TenantId")]
+        //            internal static partial void LogAuthenticationFailed(this ILogger logger, Exception ex);
+
     }
 
     internal static class GraphMailSenderLoggerExtensions
@@ -169,6 +181,9 @@ namespace MailSenderLib.Logging
 
         public static void LogFailedToCreateUploadSession(this ILogger logger, string fileName, string error, Exception? ex = null) =>
             GraphMailSenderLogs.FailedToCreateUploadSession(logger, fileName, error, ex);
+
+        public static void LogAuthenticationFailed(this ILogger logger,  Exception ex ) =>
+            GraphMailSenderLogs.AuthenticationFailed(logger, ex);
 
     }
 }
