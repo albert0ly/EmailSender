@@ -9,9 +9,9 @@ public class SendEmailRequest
     [Required]
     public List<string> To { get; set; } = new();
 
-    public List<string>? Cc { get; set; }
+    public List<string> Cc { get; set; } = new();
 
-    public List<string>? Bcc { get; set; }
+    public List<string> Bcc { get; set; } = new();
 
     [Required]
     public string Subject { get; set; } = string.Empty;

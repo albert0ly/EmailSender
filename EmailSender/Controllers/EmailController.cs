@@ -7,6 +7,7 @@ using Microsoft.Graph;
 using Microsoft.Kiota.Authentication.Azure;
 using Microsoft.Kiota.Http.HttpClientLibrary;
 using Microsoft.Extensions.Options;
+using Microsoft.Graph.Users.Item.SendMail;
 
 namespace EmailSender.Controllers;
 
@@ -27,7 +28,11 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue, ValueLengthLimit = int.MaxValue)]
     public async Task<IActionResult> Send([FromForm] SendEmailRequest request, CancellationToken ct)
     {
-        if (request.To == null || request.To.Count == 0)
+        var to = NormalizeRecipients(request.To);
+        var cc = NormalizeRecipients(request.Cc);
+        var bcc = NormalizeRecipients(request.Bcc);
+
+        if (to.Count == 0)
             return BadRequest("At least one recipient is required.");
 
         var attachments = new List<(string FileName, string ContentType, Stream ContentStream)>();
@@ -44,9 +49,9 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
         }
 
         await _emailSender.SendEmailAsync(
-            request.To,
-            request.Cc,
-            request.Bcc,
+            to,
+            cc.Count > 0 ? cc : null,
+            bcc.Count > 0 ? bcc : null,
             request.Subject,
             request.Body,
             request.IsHtml,
@@ -63,6 +68,93 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
     }
 
     /// <summary>
+    /// Simple send using Graph sendMail (single call, no chunk upload).
+    /// Attachments larger than 3 MB are rejected and should use /api/email/send.
+    /// </summary>
+    [HttpPost("simplesend")]
+    [DisableRequestSizeLimit]
+    [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue, ValueLengthLimit = int.MaxValue)]
+    public async Task<IActionResult> SimpleSend([FromForm] SendEmailRequest request, CancellationToken ct)
+    {
+        var to = NormalizeRecipients(request.To);
+        var cc = NormalizeRecipients(request.Cc);
+        var bcc = NormalizeRecipients(request.Bcc);
+
+        if (to.Count == 0)
+            return BadRequest("At least one recipient is required.");
+
+        const long maxSimpleAttachmentSize = 3L * 1024 * 1024;
+
+        var message = new Microsoft.Graph.Models.Message
+        {
+            Subject = request.Subject,
+            Body = new Microsoft.Graph.Models.ItemBody
+            {
+                ContentType = request.IsHtml ? Microsoft.Graph.Models.BodyType.Html : Microsoft.Graph.Models.BodyType.Text,
+                Content = request.Body
+            },
+            ToRecipients = to.Select(x => new Microsoft.Graph.Models.Recipient
+            {
+                EmailAddress = new Microsoft.Graph.Models.EmailAddress { Address = x }
+            }).ToList()
+        };
+
+        if (cc.Count > 0)
+        {
+            message.CcRecipients = cc.Select(x => new Microsoft.Graph.Models.Recipient
+            {
+                EmailAddress = new Microsoft.Graph.Models.EmailAddress { Address = x }
+            }).ToList();
+        }
+
+        if (bcc.Count > 0)
+        {
+            message.BccRecipients = bcc.Select(x => new Microsoft.Graph.Models.Recipient
+            {
+                EmailAddress = new Microsoft.Graph.Models.EmailAddress { Address = x }
+            }).ToList();
+        }
+
+        if (request.Attachments != null && request.Attachments.Count > 0)
+        {
+            var attachments = new List<Microsoft.Graph.Models.Attachment>();
+            foreach (var file in request.Attachments)
+            {
+                if (file.Length <= 0) continue;
+                if (file.Length > maxSimpleAttachmentSize)
+                {
+                    return BadRequest($"Attachment '{file.FileName}' is larger than 3 MB. Use /api/email/send for chunked upload.");
+                }
+
+                await using var stream = file.OpenReadStream();
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms, ct);
+
+                attachments.Add(new Microsoft.Graph.Models.FileAttachment
+                {
+                    Name = file.FileName,
+                    ContentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
+                    ContentBytes = ms.ToArray()
+                });
+            }
+
+            if (attachments.Count > 0)
+            {
+                message.Attachments = attachments;
+            }
+        }
+
+        var graph = CreateGraphClient();
+        await graph.Users[_graphOptions.MailboxAddress].SendMail.PostAsync(new SendMailPostRequestBody
+        {
+            Message = message,
+            SaveToSentItems = true
+        }, cancellationToken: ct);
+
+        return Accepted();
+    }
+
+    /// <summary>
     /// Read new (unread) messages from the specified mailbox Inbox.
     /// Returns DTOs with all attachments (file content base64 encoded for file attachments).
     /// Marks messages as read so they are not returned again.
@@ -74,12 +166,7 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
         var user = string.IsNullOrWhiteSpace(mailbox) ? _graphOptions.MailboxAddress : mailbox!;
         if (string.IsNullOrWhiteSpace(user)) return BadRequest("Mailbox must be provided either as query parameter or in configuration.");
 
-        // Build GraphServiceClient using same approach as GraphEmailSender
-        var credential = new ClientSecretCredential(_graphOptions.TenantId, _graphOptions.ClientId, _graphOptions.ClientSecret);
-        var authProvider = new AzureIdentityAuthenticationProvider(credential, GraphAllowedHosts, null, false, GraphScopes);
-        var httpClient = GraphClientFactory.Create();
-        var requestAdapter = new HttpClientRequestAdapter(authProvider, httpClient: httpClient);
-        var graph = new GraphServiceClient(requestAdapter);
+        var graph = CreateGraphClient();
 
         // Query unread messages from Inbox
         var messagesResponse = await graph.Users[user].MailFolders["inbox"].Messages.GetAsync(rc =>
@@ -214,5 +301,24 @@ public class EmailController(IEmailSender emailSender, IOptions<GraphOptions> gr
         }
 
         return Ok(result.ToArray());
+    }
+
+    private GraphServiceClient CreateGraphClient()
+    {
+        var credential = new ClientSecretCredential(_graphOptions.TenantId, _graphOptions.ClientId, _graphOptions.ClientSecret);
+        var authProvider = new AzureIdentityAuthenticationProvider(credential, GraphAllowedHosts, null, false, GraphScopes);
+        var httpClient = GraphClientFactory.Create();
+        var requestAdapter = new HttpClientRequestAdapter(authProvider, httpClient: httpClient);
+        return new GraphServiceClient(requestAdapter);
+    }
+
+    private static List<string> NormalizeRecipients(IEnumerable<string>? recipients)
+    {
+        return recipients?
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList()
+            ?? new List<string>();
     }
 }

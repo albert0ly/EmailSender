@@ -36,12 +36,15 @@ builder.Services.Configure<FormOptions>(options =>
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
+app.UseStaticFiles();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "EmailSender v1");
+        c.InjectJavascript("/swagger-custom.js");
         c.RoutePrefix = string.Empty; // serve UI at app root
     });
 }
